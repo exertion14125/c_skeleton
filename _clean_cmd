@@ -1,0 +1,11 @@
+#!/bin/bash
+# Usage: _clean_cmd [Debug|Release]
+# Default: Debug
+
+BUILD_TYPE=${1:-Debug}
+# BUILD_TYPE=${1:-Release}
+
+BUILD_DIR="_arm_linux_build/${BUILD_TYPE}"
+
+cmake --build "${BUILD_DIR}" --target clean
+# cmake --build _arm_linux_build/Debug --target clean
