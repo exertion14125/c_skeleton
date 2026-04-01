@@ -17,16 +17,17 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 #include "ra/ui/ra_ui_uds.h"
-// #include "mgr/ui/ui_proto.h"
+#include "mgr/ui/ui_notify_proto.h"
+#include "mgr/ui/ui_mgr_priv.h"
 #include "mgr/ui/ui_mgr.h"
 
 #define UI_HELLO_MAGIC0 'U'
 #define UI_HELLO_MAGIC1 'L'
 #define UI_HELLO_MAGIC2 'O'
 #define UI_HELLO_MAGIC3 'G'
-#define UI_HELLO_SIZE (4 + (int)sizeof(uint64_t))
 
 #define UI_PING_BYTE 'P' // Ping from server to UI.
 #define UI_PONG_BYTE 'K' // Keep alive ack from UI.
@@ -35,29 +36,6 @@
 #define UI_PING_RETRY_BACKOFF_MS        (100)
 #define UI_PONG_TIMEOUT_DEFAULT_MS      (5000)
 
-/// @brief UI manager context structure.
-struct ui_mgr_s {
-        ui_mgr_cfg_t cfg; ///< Configuration
-        ui_mgr_cb_t cb;   ///< Callbacks
-
-        ra_ui_uds_srv_t *srv; ///< UI UDS server
-
-        ui_mgr_state_t state;   ///< Current state
-        
-        uint64_t last_rx_ms;  ///< Last received time in milliseconds (stale policy)
-        uint64_t last_tx_ms;  ///< Last transmitted time in milliseconds (ping/server tx monitoring)
-        uint64_t last_ping_ms; ///< Next ping due time in milliseconds 
-                               /// last_ping_ms is treated as "next ping due time (ms)" (not last attempt time).
-
-        uint64_t attached_ms; ///< Last attached time in milliseconds
-
-        int      await_pong;       ///< 1 if ping sent and waiting for PONG
-        uint64_t pong_deadline_ms; ///< PONG deadline time in milliseconds
-
-        char hello_buf[UI_HELLO_SIZE]; ///< Hello message buffer
-        size_t hello_buf_len; ///< Current length of data in hello_buf
-        uint64_t hello_last_seen_wseq; ///< Last seen wseq in hello message
-};
 
 /// @brief Get current time in milliseconds.
 /// @return Current time in milliseconds.
@@ -838,5 +816,46 @@ int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
         now = now_ms();
         maybe_ping(mgr, now);
         handle_stale(mgr, now);
+        return 0;
+}
+
+/// @brief Notify the UI that a snapshot is ready.
+/// @param mgr UI manager.
+/// @param kind Snapshot kind (defined by UI_MSG_NOTIFY_SNAPSHOT_READY protocol).
+/// @param seq Snapshot sequence number (defined by UI_MSG_NOTIFY_SNAPSHOT_READY protocol).
+/// @return 0 on success, negative error code on failure.
+int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq)
+{
+        ui_notify_msg_t msg;
+        int fd;
+        ssize_t n;
+
+        if (!mgr) {
+                return -EINVAL;
+        }
+
+        if (mgr->state != UI_ST_CONNECTED) {
+                return -ENOTCONN;
+        }
+
+        fd = ra_ui_uds_client_fd(mgr->srv);
+        if (fd < 0) {
+                return -ENOTCONN;
+        }
+
+        memset(&msg, 0, sizeof(msg));
+        msg.type = UI_MSG_NOTIFY_SNAPSHOT_READY;
+        msg.kind = kind;
+        msg.seq = seq;
+
+        n = ra_ui_uds_send(fd, &msg, sizeof(msg));
+        if (n != (ssize_t)sizeof(msg)) {
+                if (n < 0) {
+                        return (int)n;
+                }
+                return -EIO;
+        }
+
+        touch_tx(mgr, now_ms());
         return 0;
 }
