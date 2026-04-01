@@ -42,6 +42,8 @@
 
 #include <ncurses.h>
 
+#include "mgr/ui/ui_proto.h"
+
 #ifndef MON_EXEC_NAME
 #define MON_EXEC_NAME "skeleton"
 #endif
@@ -49,11 +51,6 @@
 #ifndef DEF_LOG_UI_UDS_PATH
 #define DEF_LOG_UI_UDS_PATH "/var/run/"
 #endif
-
-#define UI_HELLO_MAGIC0 'U'
-#define UI_HELLO_MAGIC1 'L'
-#define UI_HELLO_MAGIC2 'O'
-#define UI_HELLO_MAGIC3 'G'
 
 #define UI_PING_BYTE 'P'
 #define UI_PONG_BYTE 'K'
@@ -65,9 +62,6 @@
 
 #define UI_SNAPSHOT_MAGIC           0x55495348u
 #define UI_SNAPSHOT_VERSION         1u
-
-#define UI_MSG_NOP                  0
-#define UI_MSG_NOTIFY_SNAPSHOT_READY 1
 
 #define UI_SNAP_KIND_MAIN           0
 
@@ -103,18 +97,6 @@ typedef struct ui_snapshot_shm_layout_s {
         ui_snapshot_hdr_t hdr;
         ui_snapshot_payload_t buf[2];
 } ui_snapshot_shm_layout_t;
-
-/* ============================================================
- * notify proto
- * ============================================================ */
-
-typedef struct ui_notify_msg_s {
-        uint16_t type;
-        uint16_t kind;
-        uint32_t seq;
-        uint32_t arg0;
-        uint32_t arg1;
-} ui_notify_msg_t;
 
 /* ============================================================
  * local shm reader
@@ -169,6 +151,8 @@ typedef struct app_ctx_s {
         local_ui_shm_t snap_shm;
         int snap_shm_opened;
         ui_snapshot_payload_t snap;
+
+        ui_rx_buf_t rx_buf;
 } app_ctx_t;
 
 /* ============================================================
@@ -186,18 +170,6 @@ static uint64_t now_ms(void)
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
-}
-
-static void write_u64_le(unsigned char *p, uint64_t v)
-{
-        p[0] = (unsigned char)((v >> 0) & 0xFF);
-        p[1] = (unsigned char)((v >> 8) & 0xFF);
-        p[2] = (unsigned char)((v >> 16) & 0xFF);
-        p[3] = (unsigned char)((v >> 24) & 0xFF);
-        p[4] = (unsigned char)((v >> 32) & 0xFF);
-        p[5] = (unsigned char)((v >> 40) & 0xFF);
-        p[6] = (unsigned char)((v >> 48) & 0xFF);
-        p[7] = (unsigned char)((v >> 56) & 0xFF);
 }
 
 static int set_nonblock(int fd)
@@ -424,29 +396,29 @@ static int connect_server(app_ctx_t *ctx)
 
 static int send_hello(app_ctx_t *ctx)
 {
-        unsigned char hello[UI_HELLO_SIZE];
-        ssize_t n;
+        ui_hello_payload_t payload;
+        int rc;
 
         if (!ctx || ctx->fd < 0) {
                 return -1;
         }
 
-        memset(hello, 0, sizeof(hello));
-        hello[0] = UI_HELLO_MAGIC0;
-        hello[1] = UI_HELLO_MAGIC1;
-        hello[2] = UI_HELLO_MAGIC2;
-        hello[3] = UI_HELLO_MAGIC3;
-        write_u64_le(&hello[4], ctx->last_seen_wseq);
+        memset(&payload, 0, sizeof(payload));
+        payload.last_seen_wseq = ctx->last_seen_wseq;
 
-        n = send(ctx->fd, hello, sizeof(hello), 0);
-        if (n != (ssize_t)sizeof(hello)) {
-                ctx->last_errno = (n < 0) ? errno : EPIPE;
+        rc = ui_proto_send_frame(ctx->fd,
+                                 UI_FRAME_HELLO,
+                                 0,
+                                 &payload,
+                                 sizeof(payload));
+        if (rc != 0) {
+                ctx->last_errno = -rc;
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "hello send fail");
+                         "hello send fail rc=%d", rc);
                 return -1;
         }
 
-        ctx->tx_count += (int)n;
+        ctx->tx_count += (int)(sizeof(ui_frame_hdr_t) + sizeof(payload));
         ctx->last_tx_ms = now_ms();
 
         snprintf(ctx->last_event, sizeof(ctx->last_event),
@@ -457,25 +429,23 @@ static int send_hello(app_ctx_t *ctx)
 
 static int send_pong(app_ctx_t *ctx)
 {
-        char b = UI_PONG_BYTE;
-        ssize_t n;
+        int rc;
 
         if (!ctx || ctx->fd < 0) {
                 return -1;
         }
 
-        n = send(ctx->fd, &b, 1, 0);
-        if (n != 1) {
-                ctx->last_errno = (n < 0) ? errno : EPIPE;
+        rc = ui_proto_send_frame(ctx->fd, UI_FRAME_PONG, 0, NULL, 0);
+        if (rc != 0) {
+                ctx->last_errno = -rc;
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "pong send fail");
+                         "pong send fail rc=%d", rc);
                 return -1;
         }
 
         ctx->pong_tx_count++;
-        ctx->tx_count++;
+        ctx->tx_count += (int)sizeof(ui_frame_hdr_t);
         ctx->last_tx_ms = now_ms();
-
         snprintf(ctx->last_event, sizeof(ctx->last_event), "pong sent");
         return 0;
 }
@@ -483,76 +453,93 @@ static int send_pong(app_ctx_t *ctx)
 /* ============================================================
  * rx processing
  * ============================================================ */
-
-static void process_notify_or_log(app_ctx_t *ctx, const unsigned char *buf, ssize_t n)
+static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const unsigned char *payload, size_t payload_len)
 {
-        if (!ctx || !buf || n <= 0) {
+        if (!ctx || !hdr) {
                 return;
         }
 
-        if (n == 1 && buf[0] == (unsigned char)UI_PING_BYTE) {
+        switch (hdr->type) {
+        case UI_FRAME_PING:
                 ctx->ping_rx_count++;
                 if (send_pong(ctx) != 0) {
                         close_conn(ctx);
                         return;
                 }
-                snprintf(ctx->last_event, sizeof(ctx->last_event), "ping received");
-                return;
-        }
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "ping frame received");
+                break;
 
-        if (n == (ssize_t)sizeof(ui_notify_msg_t)) {
-                const ui_notify_msg_t *msg = (const ui_notify_msg_t *)buf;
-
-                if (msg->type == UI_MSG_NOTIFY_SNAPSHOT_READY) {
-                        ctx->notify_rx_count++;
-                        (void)update_snapshot_from_shm(ctx);
+        case UI_FRAME_NOTIFY_SNAPSHOT:
+                if (payload_len != sizeof(ui_notify_snapshot_payload_t)) {
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                 "snapshot notify seq=%u kind=%u",
-                                 (unsigned)msg->seq,
-                                 (unsigned)msg->kind);
+                                 "snapshot notify payload size mismatch");
+                        close_conn(ctx);
                         return;
                 }
-        }
 
-        /* 기존 log/raw stream은 그대로 유지: 여기서는 마지막 일부만 화면에 반영 */
-        ctx->log_rx_count++;
+                ctx->notify_rx_count++;
+                (void)update_snapshot_from_shm(ctx);
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "snapshot notify frame received");
+                break;
 
-        {
-                size_t copy_len = (size_t)n;
-                if (copy_len >= sizeof(ctx->last_log_line)) {
-                        copy_len = sizeof(ctx->last_log_line) - 1;
-                }
+        case UI_FRAME_HELLO_ACK:
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "hello ack received");
+                break;
+        
+        case UI_FRAME_LOG_CHUNK:
+                if (payload_len == sizeof(ui_log_chunk_payload_t)) {
+                        const ui_log_chunk_payload_t *logp =
+                                (const ui_log_chunk_payload_t *)payload;
+                        size_t copy_len = (size_t)logp->text_len;
 
-                memcpy(ctx->last_log_line, buf, copy_len);
-                ctx->last_log_line[copy_len] = '\0';
-
-                /* 화면 표시용으로 제어문자 일부 정리 */
-                {
-                        size_t i;
-                        for (i = 0; i < copy_len; ++i) {
-                                if ((unsigned char)ctx->last_log_line[i] < 0x20 &&
-                                    ctx->last_log_line[i] != '\t' &&
-                                    ctx->last_log_line[i] != ' ') {
-                                        ctx->last_log_line[i] = '.';
-                                }
+                        if (copy_len >= sizeof(ctx->last_log_line)) {
+                                copy_len = sizeof(ctx->last_log_line) - 1;
                         }
+
+                        memcpy(ctx->last_log_line, logp->text, copy_len);
+                        ctx->last_log_line[copy_len] = '\0';
+                        ctx->log_rx_count++;
+
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "log chunk received seq=%u level=%u",
+                                 (unsigned)logp->seq,
+                                 (unsigned)logp->level);
+                } else {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "log chunk payload size mismatch");
+                        close_conn(ctx);
+                        return;
                 }
+                break;
+                
+        default:
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "unknown frame type=%u len=%u",
+                         (unsigned)hdr->type,
+                         (unsigned)hdr->payload_len);
+                break;
         }
 
-        snprintf(ctx->last_event, sizeof(ctx->last_event),
-                 "rx %ld bytes (log/raw)", (long)n);
+        (void)payload;
 }
 
 static void process_rx(app_ctx_t *ctx)
 {
-        unsigned char buf[UI_RX_BUF_SIZE];
+        unsigned char tmp[512];
         ssize_t n;
+        ui_frame_hdr_t hdr;
+        unsigned char payload[UI_FRAME_PAYLOAD_MAX];
+        size_t payload_len;
+        int rc;
 
         if (!ctx || ctx->fd < 0) {
                 return;
         }
 
-        n = recv(ctx->fd, buf, sizeof(buf), MSG_DONTWAIT);
+        n = recv(ctx->fd, tmp, sizeof(tmp), MSG_DONTWAIT);
         if (n == 0) {
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
                          "server closed connection");
@@ -575,7 +562,38 @@ static void process_rx(app_ctx_t *ctx)
         ctx->rx_count += (int)n;
         ctx->last_rx_ms = now_ms();
 
-        process_notify_or_log(ctx, buf, n);
+        rc = ui_proto_append_rx(&ctx->rx_buf, tmp, (size_t)n);
+        if (rc != 0) {
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "rx buffer overflow rc=%d", rc);
+                close_conn(ctx);
+                return;
+        }
+
+        for (;;) {
+                rc = ui_proto_try_parse(&ctx->rx_buf,
+                                        &hdr,
+                                        payload,
+                                        sizeof(payload),
+                                        &payload_len);
+                if (rc == 1) {
+                        /* 아직 frame 전체가 안 들어옴 */
+                        break;
+                }
+
+                if (rc != 0) {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "frame parse fail rc=%d", rc);
+                        close_conn(ctx);
+                        return;
+                }
+
+                handle_ui_frame(ctx, &hdr, payload, payload_len);
+
+                if (!ctx->connected) {
+                        return;
+                }
+        }
 }
 
 /* ============================================================
@@ -697,6 +715,7 @@ int main(int argc, char *argv[])
         int pr;
 
         memset(&ctx, 0, sizeof(ctx));
+        ui_rx_buf_init(&ctx.rx_buf);
         ctx.fd = -1;
         ctx.snap_shm.fd = -1;
         ctx.poll_timeout_ms = UI_DEFAULT_POLL_TIMEOUT_MS;

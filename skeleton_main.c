@@ -11,9 +11,10 @@
 #include "util/log/log_bootstrap.h"
 
 #include "mgr/ui/ui_mgr_bootstrap.h"
-#include "mgr/ui/ui_notify_proto.h"
 #include "mgr/ui/ui_snapshot_mgr.h"
 #include "ui/ui_snapshot_shm.h"
+
+#define UI_SNAP_KIND_MAIN           0
 
 static ui_snapshot_mgr_t* ui_snapshot_mgr = NULL;
 static ui_mgr_t* ui_mgr = NULL;

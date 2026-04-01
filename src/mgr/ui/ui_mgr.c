@@ -20,14 +20,14 @@
 #include <pthread.h>
 
 #include "ra/ui/ra_ui_uds.h"
-#include "mgr/ui/ui_notify_proto.h"
+#include "mgr/ui/ui_proto.h"
 #include "mgr/ui/ui_mgr_priv.h"
 #include "mgr/ui/ui_mgr.h"
 
-#define UI_HELLO_MAGIC0 'U'
-#define UI_HELLO_MAGIC1 'L'
-#define UI_HELLO_MAGIC2 'O'
-#define UI_HELLO_MAGIC3 'G'
+// #define UI_HELLO_MAGIC0 'U'
+// #define UI_HELLO_MAGIC1 'L'
+// #define UI_HELLO_MAGIC2 'O'
+// #define UI_HELLO_MAGIC3 'G'
 
 #define UI_PING_BYTE 'P' // Ping from server to UI.
 #define UI_PONG_BYTE 'K' // Keep alive ack from UI.
@@ -46,20 +46,20 @@ static uint64_t now_ms(void)
         return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
-/// @brief Parse a uint64_t from a byte array in LITTLE-ENDIAN wire order.
-/// @param p Pointer to the byte array.
-/// @return Parsed uint64_t value.
-static uint64_t parse_u64_le(const unsigned char *p)
-{
-        return ((uint64_t)p[0])       |
-               ((uint64_t)p[1] << 8)  |
-               ((uint64_t)p[2] << 16) |
-               ((uint64_t)p[3] << 24) |
-               ((uint64_t)p[4] << 32) |
-               ((uint64_t)p[5] << 40) |
-               ((uint64_t)p[6] << 48) |
-               ((uint64_t)p[7] << 56);
-}
+// /// @brief Parse a uint64_t from a byte array in LITTLE-ENDIAN wire order.
+// /// @param p Pointer to the byte array.
+// /// @return Parsed uint64_t value.
+// static uint64_t parse_u64_le(const unsigned char *p)
+// {
+//         return ((uint64_t)p[0])       |
+//                ((uint64_t)p[1] << 8)  |
+//                ((uint64_t)p[2] << 16) |
+//                ((uint64_t)p[3] << 24) |
+//                ((uint64_t)p[4] << 32) |
+//                ((uint64_t)p[5] << 40) |
+//                ((uint64_t)p[6] << 48) |
+//                ((uint64_t)p[7] << 56);
+// }
 
 /// @brief Update last transaction time on RX.
 /// @param mgr UI manager.
@@ -187,32 +187,53 @@ static void hello_reset(ui_mgr_t *mgr)
         if (!mgr) {
                 return;
         }
-        mgr->hello_buf_len = 0;
+        // mgr->hello_buf_len = 0;
         mgr->hello_last_seen_wseq = 0;
-        memset(mgr->hello_buf, 0, sizeof(mgr->hello_buf));
+        // memset(mgr->hello_buf, 0, sizeof(mgr->hello_buf));
 }
 
-/// @brief Parse the hello message from the UI.
+// /// @brief Parse the hello message from the UI.
+// /// @param mgr UI manager.
+// /// @return 0 on success, negative error code on failure.
+// static int hello_parse(ui_mgr_t *mgr)
+// {
+//         if (!mgr) {
+//                 return -EINVAL;
+//         }
+//         if (mgr->hello_buf_len < UI_HELLO_SIZE) {
+//                 return -EAGAIN;
+//         }
+
+//         if ((uint8_t)mgr->hello_buf[0] != (uint8_t)UI_HELLO_MAGIC0 ||
+//             (uint8_t)mgr->hello_buf[1] != (uint8_t)UI_HELLO_MAGIC1 ||
+//             (uint8_t)mgr->hello_buf[2] != (uint8_t)UI_HELLO_MAGIC2 ||
+//             (uint8_t)mgr->hello_buf[3] != (uint8_t)UI_HELLO_MAGIC3) {
+//                 mgr->hello_last_seen_wseq = 0;
+//                 return -EPROTO;
+//         }
+
+//         mgr->hello_last_seen_wseq = parse_u64_le((const unsigned char*)&mgr->hello_buf[4]);
+//         return 0;
+// }
+
+/// @brief Handle incoming data from the current UI connection during handshake or normal operation.
 /// @param mgr UI manager.
-/// @return 0 on success, negative error code on failure.
-static int hello_parse(ui_mgr_t *mgr)
+/// @param payload Pointer to the received payload data.
+/// @param payload_len Length of the received payload data in bytes.
+/// @return 0 on success, 1 if more data is needed to complete handshake, negative error code on failure.
+static int handle_hello_frame(ui_mgr_t *mgr, const unsigned char *payload, size_t payload_len)
 {
-        if (!mgr) {
+        ui_hello_payload_t hello;
+
+        if (!mgr || !payload) {
                 return -EINVAL;
         }
-        if (mgr->hello_buf_len < UI_HELLO_SIZE) {
-                return -EAGAIN;
-        }
-
-        if ((uint8_t)mgr->hello_buf[0] != (uint8_t)UI_HELLO_MAGIC0 ||
-            (uint8_t)mgr->hello_buf[1] != (uint8_t)UI_HELLO_MAGIC1 ||
-            (uint8_t)mgr->hello_buf[2] != (uint8_t)UI_HELLO_MAGIC2 ||
-            (uint8_t)mgr->hello_buf[3] != (uint8_t)UI_HELLO_MAGIC3) {
-                mgr->hello_last_seen_wseq = 0;
+        if (payload_len != sizeof(ui_hello_payload_t)) {
                 return -EPROTO;
         }
 
-        mgr->hello_last_seen_wseq = parse_u64_le((const unsigned char*)&mgr->hello_buf[4]);
+        memcpy(&hello, payload, sizeof(hello));
+        mgr->hello_last_seen_wseq = hello.last_seen_wseq;
         return 0;
 }
 
@@ -273,22 +294,31 @@ static void drop_ui(ui_mgr_t *mgr)
         mgr->state = UI_ST_IDLE;
 }
 
-
 /// @brief New UI connection attach and initialize handshake.
 /// @param mgr UI manager.
 /// @param now Current time in milliseconds.
 /// @return 0 on success, 1 need more data, negative error code on failure.
 static int ui_rx_handshake(ui_mgr_t *mgr, uint64_t now)
 {
-        int fd = ra_ui_uds_client_fd(mgr->srv);
-        if (fd < 0) return -EINVAL;
+        int fd;
+        unsigned char tmp[512];
+        ssize_t n;
+        ui_frame_hdr_t hdr;
+        unsigned char payload[UI_FRAME_PAYLOAD_MAX];
+        size_t payload_len;
+        int rc;
 
-        int budget = mgr->cfg.rx_byte_budget;
-        if (budget <= 0) budget = 1024;
+        if (!mgr) {
+                return -EINVAL;
+        }
 
-        while (budget-- > 0 && mgr->hello_buf_len < UI_HELLO_SIZE) {
-                ssize_t n = ra_ui_uds_recv(fd, mgr->hello_buf + mgr->hello_buf_len,
-                                           UI_HELLO_SIZE - mgr->hello_buf_len);
+        fd = ra_ui_uds_client_fd(mgr->srv);
+        if (fd < 0) {
+                return -EINVAL;
+        }
+
+        for (;;) {
+                n = ra_ui_uds_recv(fd, tmp, sizeof(tmp));
                 if (n == 0) {
                         return -EPIPE;
                 }
@@ -298,23 +328,43 @@ static int ui_rx_handshake(ui_mgr_t *mgr, uint64_t now)
                                 continue;
                         }
                         if (e == EAGAIN || e == EWOULDBLOCK) {
-                                return 1;
+                                return 1; /* need more data */
                         }
                         return -e;
                 }
-                mgr->hello_buf_len += (size_t)n;
+
                 touch_rx(mgr, now);
-        }
 
-        if (mgr->hello_buf_len < UI_HELLO_SIZE) {
-                return 1;
-        }
+                rc = ui_proto_append_rx(&mgr->rx_buf, tmp, (size_t)n);
+                if (rc != 0) {
+                        return rc;
+                }
 
-        int pr = hello_parse(mgr);
-        if (pr < 0) {
-                return pr; //-EPROTO, etc -> drop
+                for (;;) {
+                        rc = ui_proto_try_parse(&mgr->rx_buf,
+                                                &hdr,
+                                                payload,
+                                                sizeof(payload),
+                                                &payload_len);
+                        if (rc == 1) {
+                                return 1; /* frame incomplete */
+                        }
+                        if (rc != 0) {
+                                return rc;
+                        }
+
+                        if (hdr.type != UI_FRAME_HELLO) {
+                                return -EPROTO;
+                        }
+
+                        rc = handle_hello_frame(mgr, payload, payload_len);
+                        if (rc != 0) {
+                                return rc;
+                        }
+
+                        return 0; /* hello frame complete */
+                }
         }
-        return 0;
 }
 
 /// @brief Attach new UI connection (begin handshake).
@@ -352,7 +402,6 @@ static void finish_attach(ui_mgr_t *mgr, int cfd, uint64_t now)
         mgr->pong_deadline_ms = 0;
         mgr->state = UI_ST_CONNECTED;
 }
-
 
 /// @brief Check peer credentials of the connected UI client against the configured policy.
 /// @param mgr UI manager.
@@ -477,42 +526,86 @@ static void handle_accept(ui_mgr_t *mgr, uint64_t now)
 /// @note Protocol: 1-byte commands 
 static void handle_ui_rx(ui_mgr_t *mgr, uint64_t now)
 {
-        int fd = ra_ui_uds_client_fd(mgr->srv);
+        int rc;
+        int fd;
+        unsigned char tmp[512];
+        
+        ssize_t n;
+        ui_frame_hdr_t hdr;
+        unsigned char payload[UI_FRAME_PAYLOAD_MAX];
+        size_t payload_len;
+
+        if (!mgr) {
+                return;
+        }
+
+        fd = ra_ui_uds_client_fd(mgr->srv);
         if (fd < 0) {
                 return;
         }
 
-        int budget = mgr->cfg.rx_byte_budget;
-        if (budget <= 0) {
-                budget = 1024;
-        }
-
-        while (budget-- > 0) {
-                char b;
-                ssize_t n = ra_ui_uds_recv(fd, &b, 1);
-                if (n == 0) { /// peer closed
+        while(1) {
+                n = ra_ui_uds_recv(fd, tmp, sizeof(tmp));
+                if (n == 0) {
                         drop_ui(mgr);
                         return;
                 }
-                if (n < 0) { /// recv error
+                if (n < 0) {
                         int e = (int)(-n);
                         if (e == EINTR) {
                                 continue;
                         }
                         if (e == EAGAIN || e == EWOULDBLOCK) {
-                                return;
+                                break;
                         }
                         drop_ui(mgr);
                         return;
                 }
-                // Process received byte
+
                 touch_rx(mgr, now);
-                if ((unsigned char)b == (unsigned char)UI_PONG_BYTE) { // Received PONG
-                        continue;
-                }       
-                //=== other 1-byte commands handled here (if needed) 
-                (void)b;
-                printf("UI RX byte: 0x%02X\n", (uint8_t)b);
+
+                rc = ui_proto_append_rx(&mgr->rx_buf, tmp, (size_t)n);
+                if (rc != 0) {
+                        drop_ui(mgr);
+                        return;
+                }
+
+                while(1) {
+                        rc = ui_proto_try_parse(&mgr->rx_buf,
+                                                &hdr,
+                                                payload,
+                                                sizeof(payload),
+                                                &payload_len);
+                        if (rc == 1) {
+                                break;
+                        }
+                        if (rc != 0) {
+                                drop_ui(mgr);
+                                return;
+                        }
+
+                        switch (hdr.type) {
+                        case UI_FRAME_HELLO:
+                                if (mgr->state == UI_ST_HANDSHAKE) {
+                                        if (handle_hello_frame(mgr, payload, payload_len) == 0) {
+                                                finish_attach(mgr, fd, now);
+                                        } else {
+                                                drop_ui(mgr);
+                                                return;
+                                        }
+                                }
+                                break;
+
+                        case UI_FRAME_PONG:
+                                mgr->await_pong = 0;
+                                mgr->pong_deadline_ms = 0;
+                                break;
+
+                        default:
+                                /* 1차 패치에서는 unknown frame 무시 또는 로깅 */
+                                break;
+                        }
+                }
         }
 }
 
@@ -545,40 +638,31 @@ static int ping_due(const ui_mgr_t *mgr, uint64_t now)
 static int ping_send(ui_mgr_t *mgr, uint64_t now)
 {
         int fd;
-        char p;
+        int rc;
 
-        if (!mgr) return -EINVAL;
+        if (!mgr) {
+                return -EINVAL;
+        }
         fd = ra_ui_uds_client_fd(mgr->srv);
-        if (fd < 0) return -EINVAL;
+        if (fd < 0) {
+                return -EINVAL;
+        }
 
-        p = UI_PING_BYTE;
-
-        ssize_t sn = ra_ui_uds_send(fd, &p, 1);
-        if (sn == 1) {
+        rc = ui_proto_send_frame(fd, UI_FRAME_PING, 0, NULL, 0);
+        if (rc == 0) {
                 touch_tx(mgr, now);
                 mgr->last_ping_ms = now + (uint64_t)mgr->cfg.ping_interval_ms;
                 mgr->await_pong = 1;
                 mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
                 return 0;
         }
-        if (sn < 0) {
-                int e = (int)(-sn);
-                if (e == EINTR) { /// retry immediately
-                        mgr->last_ping_ms = now + (uint64_t)UI_PING_RETRY_BACKOFF_MS;
-                        mgr->await_pong = 1;
-                        mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
-                        return 1;
-                }
-                if (e == EAGAIN || e == EWOULDBLOCK) {
-                        /// retry soon without blocking the loop
-                        mgr->last_ping_ms = now + (uint64_t)UI_PING_RETRY_BACKOFF_MS;
-                        mgr->await_pong = 1;
-                        mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
-                        return 1; /* retry later */
-                }
-                return -e;
+        if (rc == -EAGAIN || rc == -EWOULDBLOCK || rc == -EINTR) {
+                mgr->last_ping_ms = now + (uint64_t)UI_PING_RETRY_BACKOFF_MS;
+                mgr->await_pong = 1;
+                mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
+                return 1; /* retry later */
         }
-        return -EPIPE;
+        return rc; /* other error */
 }
 
 
@@ -692,6 +776,7 @@ int init_ui_mgr(ui_mgr_t *mgr, const ui_mgr_cfg_t *cfg, const ui_mgr_cb_t *cb)
                 ra_ui_uds_srv_destroy(&mgr->srv);
                 return rc;
         }
+        ui_rx_buf_init(&mgr->rx_buf);
         mgr->state = UI_ST_INIT;
         return 0;
 }
@@ -826,11 +911,49 @@ int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
 /// @return 0 on success, negative error code on failure.
 int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq)
 {
-        ui_notify_msg_t msg;
         int fd;
-        ssize_t n;
+        int rc;
+        ui_notify_snapshot_payload_t payload;
 
         if (!mgr) {
+                return -EINVAL;
+        }
+        if (mgr->state != UI_ST_CONNECTED) {
+                return -ENOTCONN;
+        }
+
+        fd = ra_ui_uds_client_fd(mgr->srv);
+        if (fd < 0) {
+                return -ENOTCONN;
+        }
+
+        memset(&payload, 0, sizeof(payload));
+        payload.kind = kind;
+        payload.seq = seq;
+
+        rc = ui_proto_send_frame(fd, UI_FRAME_NOTIFY_SNAPSHOT, 0, &payload, sizeof(payload));
+        if (rc != 0) {
+                return rc;
+        }
+
+        touch_tx(mgr, now_ms());
+        return 0;
+}
+
+/// @brief Send a log chunk to the UI.
+/// @param mgr UI manager.
+/// @param seq Log chunk sequence number (defined by UI_MSG_LOG_CHUNK protocol).
+/// @param level Log level (defined by UI_MSG_LOG_CHUNK protocol).
+/// @param text Log text (null-terminated string, truncated if exceeds UI_LOG_TEXT_MAX).
+/// @return 0 on success, negative error code on failure.
+int ui_mgr_send_log_chunk(ui_mgr_t *mgr, uint32_t seq, uint16_t level, const char *text)
+{
+        ui_log_chunk_payload_t payload;
+        int fd;
+        size_t text_len;
+        int rc;
+
+        if (!mgr || !text) {
                 return -EINVAL;
         }
 
@@ -843,17 +966,26 @@ int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq)
                 return -ENOTCONN;
         }
 
-        memset(&msg, 0, sizeof(msg));
-        msg.type = UI_MSG_NOTIFY_SNAPSHOT_READY;
-        msg.kind = kind;
-        msg.seq = seq;
+        memset(&payload, 0, sizeof(payload));
+        payload.seq = seq;
+        payload.level = level;
 
-        n = ra_ui_uds_send(fd, &msg, sizeof(msg));
-        if (n != (ssize_t)sizeof(msg)) {
-                if (n < 0) {
-                        return (int)n;
-                }
-                return -EIO;
+        text_len = strlen(text);
+        if (text_len >= UI_LOG_TEXT_MAX) {
+                text_len = UI_LOG_TEXT_MAX - 1;
+        }
+
+        payload.text_len = (uint16_t)text_len;
+        memcpy(payload.text, text, text_len);
+        payload.text[text_len] = '\0';
+
+        rc = ui_proto_send_frame(fd,
+                                 UI_FRAME_LOG_CHUNK,
+                                 0,
+                                 &payload,
+                                 sizeof(payload));
+        if (rc != 0) {
+                return rc;
         }
 
         touch_tx(mgr, now_ms());

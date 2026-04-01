@@ -79,6 +79,7 @@ extern ui_mgr_state_t get_ui_mgr_state(const ui_mgr_t *mgr);
 extern int  ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms); /// Using in main loop or thread
 
 extern int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq);
+extern int ui_mgr_send_log_chunk(ui_mgr_t *mgr, uint32_t seq, uint16_t level, const char *text);
 
 extern int ui_mgr_start_runloop(ui_mgr_t *mgr);
 extern int ui_mgr_request_start(ui_mgr_t *mgr);
