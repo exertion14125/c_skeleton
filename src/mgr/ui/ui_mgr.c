@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -60,7 +64,6 @@ struct ui_mgr_s {
 static uint64_t now_ms(void)
 {
         struct timespec ts;
-        /* Linux 2.6: clock_gettime 사용 가능(대부분). 안되면 gettimeofday로 대체 */
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
@@ -372,6 +375,56 @@ static void finish_attach(ui_mgr_t *mgr, int cfd, uint64_t now)
         mgr->state = UI_ST_CONNECTED;
 }
 
+
+/// @brief Check peer credentials of the connected UI client against the configured policy.
+/// @param mgr UI manager.
+/// @param cfd Client file descriptor.
+/// @return 0 on success, negative error code on failure.
+static int check_peer_cred(ui_mgr_t *mgr, int cfd)
+{
+        if (!mgr) {
+                return -EINVAL;
+        }
+        if (cfd < 0) {
+                return -EINVAL;
+        }
+
+        if (!mgr->cfg.enable_peer_cred_check) {
+                return 0;
+        }
+
+#if defined(SO_PEERCRED)
+        struct ucred cred;
+        socklen_t len = (socklen_t)sizeof(cred);
+        memset(&cred, 0, sizeof(cred));
+        if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0) {
+                return -errno;
+        }
+        /// Root UID (0) is a special case that can be allowed by allow_root_uid even if allow_uid is not 0, but still subject to peer credential checks if enabled.
+        if (cred.uid == 0 && mgr->cfg.allow_root_uid) {
+                return 0;
+        }
+        /// UID check (if allow_uid is set, it must match; if allow_uid is not set, any UID is allowed)
+        if (mgr->cfg.allow_uid >= 0) {
+                if ((int)cred.uid != mgr->cfg.allow_uid) {
+                        // fprintf(stderr, "ui_mgr: reject peer by uid pid=%ld uid=%ld gid=%ld\n", (long)cred.pid, (long)cred.uid, (long)cred.gid);
+                        return -EACCES;
+                }
+        }
+        /// GID check (if allow_gid is set, it must match; if allow_gid is not set, any GID is allowed)
+        if (mgr->cfg.allow_gid >= 0) {
+                if ((int)cred.gid != mgr->cfg.allow_gid) {
+                        // fprintf(stderr, "ui_mgr: reject peer by gid pid=%ld uid=%ld gid=%ld\n", (long)cred.pid, (long)cred.uid, (long)cred.gid);
+                        return -EACCES;
+                }
+        }
+        return 0;
+#else
+        (void)cfd;
+        return -ENOTSUP;
+#endif
+}
+
 /// @brief Handle new UI connection acceptance based on policy.
 /// @param mgr UI manager.
 /// @param now Current time in milliseconds.
@@ -387,6 +440,12 @@ static void handle_accept(ui_mgr_t *mgr, uint64_t now)
                         return;
                 }
                 /* other accept error: ignore */
+                return;
+        }
+        
+        int vrc = check_peer_cred(mgr, cfd);
+        if (vrc != 0) {
+                close(cfd);
                 return;
         }
 
@@ -625,6 +684,7 @@ int init_ui_mgr(ui_mgr_t *mgr, const ui_mgr_cfg_t *cfg, const ui_mgr_cb_t *cb)
 
         memset(mgr, 0, sizeof(ui_mgr_t));
         mgr->cfg = *cfg;
+
         if (cb) {
                 mgr->cb = *cb;
         } else {
@@ -637,12 +697,21 @@ int init_ui_mgr(ui_mgr_t *mgr, const ui_mgr_cfg_t *cfg, const ui_mgr_cb_t *cb)
         if (mgr->cfg.chmod_mode == 0) {
                 mgr->cfg.chmod_mode = 0660;
         }
+        if (mgr->cfg.enable_peer_cred_check) {
+                if (mgr->cfg.allow_uid == 0 && mgr->cfg.allow_root_uid == 0) {
+                        mgr->cfg.allow_uid = -1;
+                }
+                if (mgr->cfg.allow_gid == 0) {
+                        mgr->cfg.allow_gid = -1;
+                }
+        }
         mgr->srv = ra_ui_uds_srv_alloc();
         if (!mgr->srv) {
                 return -ENOMEM;
         }
         int rc = ra_ui_uds_srv_init(mgr->srv, mgr->cfg.sock_path, mgr->cfg.backlog, mgr->cfg.chmod_mode, mgr->cfg.nonblock);
         if (rc) {
+                ra_ui_uds_srv_destroy(&mgr->srv);
                 return rc;
         }
         mgr->state = UI_ST_INIT;

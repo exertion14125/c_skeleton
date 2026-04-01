@@ -44,7 +44,10 @@ struct ui_mgr_cfg_s {
 
         int ping_interval_ms; ///< Server ping interval in milliseconds (0: disable)
         
-//         int enable_peer_cred_check; ///<SO_PEERCRED check option.
+        int enable_peer_cred_check; ///<SO_PEERCRED check option.
+        int allow_uid;              ///< Allowed UID for UI connection (-1: disable)
+        int allow_gid;              ///< Allowed GID for UI connection (-1: disable)
+        int allow_root_uid;         ///< Allow root UID (0) for UI connection (0: check policy, 1: uid 0 allowed)
 };
 typedef struct ui_mgr_cfg_s ui_mgr_cfg_t;
 

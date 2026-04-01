@@ -47,6 +47,12 @@ ui_mgr_t* bootstrap_ui_mgr(void)
                 ucfg.ping_interval_ms = 0; // Disable ping.
                 ucfg.stale_timeout_ms = 0; // Disable stale timeout.
 
+                // For security, enable peer credential check and allow only root (uid 0) by default.
+                ucfg.enable_peer_cred_check = 1; 
+                ucfg.allow_uid = -1;
+                ucfg.allow_gid = -1;
+                ucfg.allow_root_uid = 1;
+
                 ui_mgr_cb_t cb;
                 memset(&cb, 0, sizeof(cb));
                 cb.user = NULL;
