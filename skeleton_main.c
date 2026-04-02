@@ -82,9 +82,7 @@ static void stop_app(int signal)
         g_run = false;
 }
 
-/* ============================================================
- * snapshot publish sample
- * ============================================================ */
+//===== snapshot publish sample. =====//
 static uint64_t get_now_ms(void)
 {
         struct timespec ts;
@@ -138,6 +136,30 @@ static void publish_sample_ui_snapshot(void)
         }
 }
 
+//===== Manager bus sample. =====//
+#include "mgr/contract/mgr_addrs.h"
+#include "util/mgr_bus/mgr_bus.h"
+static const mgr_bus_addr_t g_mgr_addrs[] = {
+        APP_MGR_ADDR_SYS,       /// MAIN Manager. Main FSM and Process Control.
+        APP_MGR_ADDR_CFG,       /// Configuration Manager. Configuration file read/write and management.
+        APP_MGR_ADDR_GIO,       /// General I/O Manager. RS-485/CAN BUS I/O control and management.
+        APP_MGR_ADDR_RED,       /// Redundancy Manager. Redundancy control and management for high availability.
+        APP_MGR_ADDR_UI         /// Monitoring UI Manager. User interface management.
+};
+
+/// @brief Create a sample manager bus with predefined addresses and queue capacity.
+/// @return Pointer to the created manager bus instance, or NULL on failure.
+mgr_bus_t *create_sample_mgr_bus(void)
+{
+        mgr_bus_cfg_t cfg = {
+                .addrs = g_mgr_addrs,
+                .addr_count = sizeof(g_mgr_addrs) / sizeof(g_mgr_addrs[0]),
+                .qcap = 64
+        };
+        return mgr_bus_create(&cfg);
+}
+
+
 /// @brief Main function. Common argument pointer declare.
 /// @param argc argument count.
 /// @param argv argumnet value.
@@ -185,7 +207,15 @@ int main(int argc, char *argv[])
                 destroy_ui_snapshot_mgr(&ui_snapshot_mgr);
                 goto skeleton_exit;
         }
-        //===== Initialize skeleton process. 
+        //===== Initialize skeleton process.
+        //=== Manager process bootstrap sample. If your process has no manager process, you can skip this part.
+
+        mgr_bus_t *mgr_bus = create_sample_mgr_bus();
+        if (mgr_bus == NULL) {
+                LOGE_T("MAIN", "Failed to create sample manager bus.\n");
+                goto skeleton_exit;
+        }
+
         // skeleton_proc_t* skeleton_proc = bootstrap_skeleton_proc();
         // if (skeleton_proc == NULL) {
         //         LOGE_T("SKELETON", "Failed to bootstrap SKELETON process.\n");
