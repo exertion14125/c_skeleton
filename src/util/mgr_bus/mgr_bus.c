@@ -175,7 +175,9 @@ void mgr_bus_destroy(mgr_bus_t **pb)
 /// @param b Pointer to the manager bus structure
 void mgr_bus_wakeup(mgr_bus_t *b)
 {
-        if (!b) return;
+        if (!b) {
+                return;
+        }
         pthread_mutex_lock(&b->mt);
         b->wake = 1;
         pthread_cond_broadcast(&b->cv);
@@ -237,8 +239,10 @@ int mgr_bus_try_push(mgr_bus_t *b, const mgr_bus_msg_t *m)
 /// @return 1 if a message is popped, 0 if timeout or empty, -1 on error or wakeup
 int mgr_bus_pop(mgr_bus_t *b, mgr_bus_msg_t *out, int32_t timeout_ms)
 {
-        if (!b || !out) return -1;
-        for (;;) {
+        if (!b || !out) {
+                return -1;
+        }
+        while (1) {
                 pthread_mutex_lock(&b->mt);
                 while (!b->wake) {
                         int found = 0;
