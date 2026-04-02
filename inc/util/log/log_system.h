@@ -6,6 +6,7 @@
 #include "log_level.h"
 #include "log_cfg_dto.h"
 #include "log_cfg_adapter.h"
+#include "log_ui_sender.h"
 
 //===== Lifecycle =====//
 extern int  init_log_system(void);
@@ -20,6 +21,7 @@ extern int get_log_system_cfg(log_cfg_out_t *cfg_out);
 extern int get_log_system_status(log_status_out_t *status_out);
 
 //===== UI Sink helpers =====//
+extern int set_log_system_ui_sender(const log_ui_sender_t *sender);
 extern int attach_log_system_ui(int fd, uint64_t last_seen_wseq); // fd: UDS socket fd
 extern int detach_log_system_ui(int fd); // fd: UDS socket fd
 

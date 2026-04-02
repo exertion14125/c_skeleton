@@ -12,6 +12,8 @@
 static log_core_t *g_log_core = NULL;
 static pthread_mutex_t g_log_sys_mt = PTHREAD_MUTEX_INITIALIZER;
 static bool g_log_sys_inited = false;
+static log_ui_sender_t g_log_ui_sender;
+static int g_log_ui_sender_valid = 0;
 
 /// @brief Get the global log core instance (unsafe, no locking).
 /// @return Pointer to the global log core instance. 
@@ -19,6 +21,44 @@ static log_core_t* sys_core_get_unsafe(void)
 {
         return g_log_core;
 }
+
+/// @brief Apply the UI sender to the log core without locking. Caller must hold g_log_sys_mt.
+/// @param core Pointer to log core.
+/// @return 0 on success, negative errno on failure.
+static int apply_ui_sender_to_core_unsafe(log_core_t *core)
+{
+        if (!core) {
+                return -1;
+        }
+
+        if (!g_log_ui_sender_valid || !g_log_ui_sender.send_fn) {
+                return 0;
+        }
+
+        return set_log_core_ui_sender(core, &g_log_ui_sender);
+}
+
+/// @brief Set the UI sender for the log system. This allows the log core to send log lines to the UI subscriber through the provided sender callback.
+/// @param sender Pointer to the UI sender structure containing the callback function and user data.
+/// @return 0 on success, negative errno on failure.
+int set_log_system_ui_sender(const log_ui_sender_t *sender)
+{
+        int rc = 0;
+
+        if (!sender || !sender->send_fn) {
+                return -1;
+        }
+
+        pthread_mutex_lock(&g_log_sys_mt);
+        g_log_ui_sender = *sender;
+        g_log_ui_sender_valid = 1;
+        if (g_log_sys_inited && g_log_core) {
+                rc = apply_ui_sender_to_core_unsafe(g_log_core);
+        }
+        pthread_mutex_unlock(&g_log_sys_mt);
+        return rc;
+}
+
 
 /// @brief Initialize the log system.
 /// @return 0 on success, negative errno on failure.
@@ -66,6 +106,7 @@ int  init_log_system(void)
                 printf("Failed to apply default log core configuration: %d\n", ret);
                 return ret;
         }
+        (void)apply_ui_sender_to_core_unsafe(g_log_core);
         g_log_sys_inited = true;
         pthread_mutex_unlock(&g_log_sys_mt);
         return 0;
@@ -84,6 +125,8 @@ void exit_log_system(void)
                 destroy_log_core(&g_log_core);
         }
         g_log_sys_inited = false;
+        memset(&g_log_ui_sender, 0, sizeof(g_log_ui_sender));
+        g_log_ui_sender_valid = 0;
         pthread_mutex_unlock(&g_log_sys_mt);
 }
 

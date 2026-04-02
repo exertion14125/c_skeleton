@@ -102,6 +102,10 @@ struct log_core_s {
         log_sink_t    *sink_net; ///< log sinks - network sink (UDP).
         log_sink_t    *sink_ui; ///< log sinks - UI sink.
         int ui_fd; ///< UI sink UDS fd.
+
+        log_ui_sender_t ui_sender; ///< registered ui sender callback
+        int ui_sender_valid; ///< ui sender registration flag
+
         // log_stats_t    stats;
 //====== log stats
         bool inited; ///< log core initialized or not. (set opt and init_log first only once)
@@ -566,7 +570,9 @@ log_core_t* alloc_log_core(void)
 
         core->inited = false;
         core->stop_log = false;
-        core->ui_fd = -1; 
+        core->ui_fd = -1;
+        memset(&core->ui_sender, 0, sizeof(core->ui_sender));
+        core->ui_sender_valid = 0;
 
         memset(&core->cfg, 0, sizeof(core->cfg));
         core->cfg.size = sizeof(core->cfg);
@@ -731,8 +737,31 @@ int get_log_core_status(log_core_t *core, log_status_out_t *out)
         return 0;
 }
 
-// mgr/ui adapter supply
-extern int ui_log_stream_frame_sender(void *user, int fd, const char *text,size_t text_len);
+/// @brief Set log core UI sender callback.
+/// @param core Pointer to log core.
+/// @param sender Pointer to log UI sender callback structure.
+/// @return 0 on success, -1 on failure.
+int set_log_core_ui_sender(log_core_t *core, const log_ui_sender_t *sender)
+{
+        log_sink_t *s;
+
+        if (!core || !sender || !sender->send_fn) {
+                return -1;
+        }
+
+        pthread_mutex_lock(&core->mt_log);
+        core->ui_sender = *sender;
+        core->ui_sender_valid = 1;
+        pthread_mutex_unlock(&core->mt_log);
+
+        s = get_log_sink(core, LOG_SINK_UI);
+        if (s) {
+                (void)log_sink_ui_set_sender(s, sender);
+                log_sink_unref(s);
+        }
+
+        return 0;
+}
 
 /// @brief Attach a file descriptor to the log core for logging.
 /// @param core Pointer to log core.
@@ -740,6 +769,8 @@ extern int ui_log_stream_frame_sender(void *user, int fd, const char *text,size_
 /// @return 0 on success, -1 on failure.
 int attach_log_core_fd(log_core_t *core, int fd, uint64_t last_seen_wseq)
 {
+        log_ui_sender_t sender;
+        int has_sender = 0;
         if (!core) {
                 return -1;
         }
@@ -751,16 +782,17 @@ int attach_log_core_fd(log_core_t *core, int fd, uint64_t last_seen_wseq)
         }
         pthread_mutex_lock(&core->mt_log);
         core->ui_fd = fd;
+        if (core->ui_sender_valid) {
+                sender = core->ui_sender;
+                has_sender = 1;
+        }
         pthread_mutex_unlock(&core->mt_log);
+
         log_sink_t *s = get_log_sink(core, LOG_SINK_UI);
         if (s) {
-                log_ui_stream_sender_t sender;
-                memset(&sender, 0, sizeof(sender));
-                sender.user = NULL;
-                sender.send_fn = ui_log_stream_frame_sender;
-
-                (void)log_sink_ui_set_sender(s, &sender);
-
+                if (has_sender) {
+                        (void)log_sink_ui_set_sender(s, &sender);
+                }
                 (void)log_sink_ui_attach_fd(s, fd, last_seen_wseq);
                 log_sink_unref(s);
         }

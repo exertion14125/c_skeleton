@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
+#include "util/log/log_ui_sender.h"
 #include "util/log/log_level.h"
 #include "util/log/log_cfg_dto.h"
 
@@ -40,9 +41,10 @@ extern int get_log_core_cfg(log_core_t *core, log_cfg_out_t *out);
 extern int get_log_core_status(log_core_t *core, log_status_out_t *out);
 
 //====== ui attach/detach ======//
+extern int set_log_core_ui_sender(log_core_t *core, const log_ui_sender_t *sender);
 extern int attach_log_core_fd(log_core_t *core, int fd, uint64_t last_seen_wseq); // fd: UDS socket fd
 extern int detach_log_core_fd(log_core_t *core, int fd); // fd: UDS socket fd
-
+ 
 //===== helpers API =====//
 extern void write_log_v(log_core_t* core, log_level_t lvl, const char *tag, const char *file, int line, const char *func, const char *fmt, va_list ap);
 

@@ -4,7 +4,25 @@
 
 #include "skeleton_const.h"
 
+#include "util/log/log_system.h"
+
 #include "mgr/ui/ui_mgr_bootstrap.h"
+
+/// Forward declaration of UI log stream sender callback function defined in mgr/ui/ui_log_adapter.c
+extern int ui_log_stream_frame_sender(void *user, int fd, const char *text, size_t text_len);
+
+/// @brief Bind the UI log sender callback to the log core. This allows the log core to send log lines to the UI subscriber through the provided sender callback.
+/// @return 0 on success, negative errno on failure.
+static int bind_ui_log_sender(void)
+{
+        log_ui_sender_t sender;
+
+        memset(&sender, 0, sizeof(sender));
+        sender.user = NULL;
+        sender.send_fn = ui_log_stream_frame_sender;
+
+        return set_log_system_ui_sender(&sender);
+}
 
 /// @brief UI log attach callback function.
 /// @param user user pointer.
@@ -30,6 +48,11 @@ static void cb_ui_on_detach(void *user, int fd)
 /// @param ui_mgr Pointer to UI manager pointer.
 ui_mgr_t* bootstrap_ui_mgr(void)
 {
+        int rc = bind_ui_log_sender();
+        if (rc < 0) {
+                return NULL;
+        }
+
         ui_mgr_t* ui_mgr = NULL;
         if ((ui_mgr = alloc_ui_mgr())) {
                 ui_mgr_cfg_t ucfg;

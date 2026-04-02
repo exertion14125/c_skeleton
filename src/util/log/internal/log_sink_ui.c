@@ -46,7 +46,7 @@ typedef struct log_sink_ui_ctx_s {
         log_ui_ring_t log_ui_ring;
         pthread_mutex_t ring_mt;
 
-        log_ui_stream_sender_t sender; ///< Sender callback for UI log sink to send log line to UI subscriber.
+        log_ui_sender_t  sender; ///< Sender callback for UI log sink to send log line to UI subscriber.
 
         log_sink_stats_t stats; ///< Statistics.
 } log_sink_ui_ctx_t;
@@ -264,7 +264,7 @@ static int ui_write(void *ctx, const char *buf, size_t len)
 
         int fd = c->uds_fd;
         int has_sender = (c->sender.send_fn != NULL);
-        log_ui_stream_sender_t sender = has_sender ? c->sender : (log_ui_stream_sender_t){0};
+        log_ui_sender_t sender = has_sender ? c->sender : (log_ui_sender_t){0};
         bool do_stream = (c->cfg.enable_uds_notify && c->has_subscriber && fd >= 0);
         // printf("UI sink: do_stream=%d has_subscriber=%d uds_fd=%d\n", do_stream ? 1 : 0, c->has_subscriber ? 1 : 0, fd);
         pthread_mutex_unlock(&c->ring_mt);
@@ -420,7 +420,7 @@ int log_sink_ui_attach_fd(log_sink_t *sink, int uds_fd, uint64_t last_seen_wseq)
         uint32_t slots = c->log_ui_ring.slots;
         uint32_t line_max = c->log_ui_ring.line_max;
         uint32_t start = get_log_ui_ring_oldest_idx(&c->log_ui_ring);
-        log_ui_stream_sender_t sender = c->sender;
+        log_ui_sender_t sender = c->sender;
 
         //==== Copy (line and sequence) to temporary buffer
         char *lines = NULL;
@@ -522,7 +522,7 @@ int log_sink_ui_detach_fd(log_sink_t *sink, int uds_fd)
 /// @param sink UI log sink.
 /// @param sender Sender callback structure.
 /// @return 0 on success, negative errno on failure.
-int log_sink_ui_set_sender(log_sink_t *sink, const log_ui_stream_sender_t *sender)
+int log_sink_ui_set_sender(log_sink_t *sink, const log_ui_sender_t *sender)
 {
         log_sink_ui_ctx_t *c;
 
