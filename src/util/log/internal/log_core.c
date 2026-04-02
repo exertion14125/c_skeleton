@@ -731,6 +731,9 @@ int get_log_core_status(log_core_t *core, log_status_out_t *out)
         return 0;
 }
 
+// mgr/ui adapter supply
+extern int ui_log_stream_frame_sender(void *user, int fd, const char *text,size_t text_len);
+
 /// @brief Attach a file descriptor to the log core for logging.
 /// @param core Pointer to log core.
 /// @param fd File descriptor to attach.
@@ -751,7 +754,14 @@ int attach_log_core_fd(log_core_t *core, int fd, uint64_t last_seen_wseq)
         pthread_mutex_unlock(&core->mt_log);
         log_sink_t *s = get_log_sink(core, LOG_SINK_UI);
         if (s) {
-                log_sink_ui_attach_fd(s, fd, last_seen_wseq);
+                log_ui_stream_sender_t sender;
+                memset(&sender, 0, sizeof(sender));
+                sender.user = NULL;
+                sender.send_fn = ui_log_stream_frame_sender;
+
+                (void)log_sink_ui_set_sender(s, &sender);
+
+                (void)log_sink_ui_attach_fd(s, fd, last_seen_wseq);
                 log_sink_unref(s);
         }
         

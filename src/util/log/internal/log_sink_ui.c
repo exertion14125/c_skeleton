@@ -46,6 +46,8 @@ typedef struct log_sink_ui_ctx_s {
         log_ui_ring_t log_ui_ring;
         pthread_mutex_t ring_mt;
 
+        log_ui_stream_sender_t sender; ///< Sender callback for UI log sink to send log line to UI subscriber.
+
         log_sink_stats_t stats; ///< Statistics.
 } log_sink_ui_ctx_t;
 
@@ -261,6 +263,8 @@ static int ui_write(void *ctx, const char *buf, size_t len)
         c->stats.written_bytes += (uint64_t)n;
 
         int fd = c->uds_fd;
+        int has_sender = (c->sender.send_fn != NULL);
+        log_ui_stream_sender_t sender = has_sender ? c->sender : (log_ui_stream_sender_t){0};
         bool do_stream = (c->cfg.enable_uds_notify && c->has_subscriber && fd >= 0);
         // printf("UI sink: do_stream=%d has_subscriber=%d uds_fd=%d\n", do_stream ? 1 : 0, c->has_subscriber ? 1 : 0, fd);
         pthread_mutex_unlock(&c->ring_mt);
@@ -269,7 +273,15 @@ static int ui_write(void *ctx, const char *buf, size_t len)
                 return 0;
         }
 
-        int rc = send_all_buffer(fd, tmp, strnlen(tmp, (size_t) c->log_ui_ring.line_max));
+        size_t out_len = strnlen(tmp, (size_t)c->log_ui_ring.line_max);
+        int rc;
+
+        if (has_sender) {
+                rc = sender.send_fn(sender.user, fd, tmp, out_len);
+        } else {
+                rc = send_all_buffer(fd, tmp, out_len); /* 임시 fallback */
+        }
+
         if (rc == 0) {
                 return 0;
         }
@@ -277,15 +289,13 @@ static int ui_write(void *ctx, const char *buf, size_t len)
         pthread_mutex_lock(&c->ring_mt);
         c->stats.errors++;
 
-        if (rc == -EAGAIN) {
-                // Non-fatal error, try later
+        if (rc == -EAGAIN) { // Non-fatal error, try later
                 c->stats.dropped++;
                 pthread_mutex_unlock(&c->ring_mt);
                 return 0;
         }
 
-        if (is_fatal_send_err(-rc)) {
-                // Fatal error, clear subscriber
+        if (is_fatal_send_err(-rc)) { // Fatal error, clear subscriber
                 c->has_subscriber = 0;
                 c->uds_fd = -1;
         }
@@ -368,6 +378,8 @@ log_sink_t* log_sink_ui_create(const log_sink_ui_cfg_t *cfg)
         c->uds_fd = -1;
         c->has_subscriber = 0;
         memset(&c->stats, 0, sizeof(c->stats));
+        
+        memset(&c->sender, 0, sizeof(c->sender));
 
         int rc = alloc_log_ui_ring(&c->log_ui_ring, c->cfg.backlog_slot, c->cfg.line_max);
         if (rc != 0) {
@@ -408,6 +420,7 @@ int log_sink_ui_attach_fd(log_sink_t *sink, int uds_fd, uint64_t last_seen_wseq)
         uint32_t slots = c->log_ui_ring.slots;
         uint32_t line_max = c->log_ui_ring.line_max;
         uint32_t start = get_log_ui_ring_oldest_idx(&c->log_ui_ring);
+        log_ui_stream_sender_t sender = c->sender;
 
         //==== Copy (line and sequence) to temporary buffer
         char *lines = NULL;
@@ -449,7 +462,12 @@ int log_sink_ui_attach_fd(log_sink_t *sink, int uds_fd, uint64_t last_seen_wseq)
                         if (ln == 0 ) {
                                 continue;
                         }
-                        int rc = send_all_buffer(uds_fd, line, ln);
+                        int rc;
+                        if (c->sender.send_fn) {
+                                rc = sender.send_fn(sender.user, uds_fd, line, ln);
+                        } else {
+                                rc = send_all_buffer(uds_fd, line, ln); /* 임시 fallback */
+                        }
                         if (rc == 0) {
                                 continue;
                         }
@@ -497,5 +515,26 @@ int log_sink_ui_detach_fd(log_sink_t *sink, int uds_fd)
         c->uds_fd = -1;
         c->has_subscriber = 0;
         pthread_mutex_unlock(&c->ring_mt);
+        return 0;
+}
+
+/// @brief Set sender callback for UI log sink to send log line to UI subscriber.
+/// @param sink UI log sink.
+/// @param sender Sender callback structure.
+/// @return 0 on success, negative errno on failure.
+int log_sink_ui_set_sender(log_sink_t *sink, const log_ui_stream_sender_t *sender)
+{
+        log_sink_ui_ctx_t *c;
+
+        if (!sink || !sink->ctx || !sender || !sender->send_fn) {
+                return -EINVAL;
+        }
+
+        c = (log_sink_ui_ctx_t *)sink->ctx;
+
+        pthread_mutex_lock(&c->ring_mt);
+        c->sender = *sender;
+        pthread_mutex_unlock(&c->ring_mt);
+
         return 0;
 }

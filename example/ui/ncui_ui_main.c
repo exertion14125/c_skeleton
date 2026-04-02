@@ -52,13 +52,8 @@
 #define DEF_LOG_UI_UDS_PATH "/var/run/"
 #endif
 
-#define UI_PING_BYTE 'P'
-#define UI_PONG_BYTE 'K'
-
-#define UI_HELLO_SIZE               12
 #define UI_DEFAULT_POLL_TIMEOUT_MS  100
 #define UI_RECONNECT_DELAY_MS       1000
-#define UI_RX_BUF_SIZE              512
 
 #define UI_SNAPSHOT_MAGIC           0x55495348u
 #define UI_SNAPSHOT_VERSION         1u
@@ -504,17 +499,15 @@ static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const uns
                         ctx->log_rx_count++;
 
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                 "log chunk received seq=%u level=%u",
-                                 (unsigned)logp->seq,
-                                 (unsigned)logp->level);
+                                "log chunk received");
                 } else {
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                 "log chunk payload size mismatch");
+                                "log chunk payload size mismatch");
                         close_conn(ctx);
                         return;
                 }
                 break;
-                
+                    
         default:
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
                          "unknown frame type=%u len=%u",

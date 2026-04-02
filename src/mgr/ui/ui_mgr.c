@@ -24,14 +24,6 @@
 #include "mgr/ui/ui_mgr_priv.h"
 #include "mgr/ui/ui_mgr.h"
 
-// #define UI_HELLO_MAGIC0 'U'
-// #define UI_HELLO_MAGIC1 'L'
-// #define UI_HELLO_MAGIC2 'O'
-// #define UI_HELLO_MAGIC3 'G'
-
-#define UI_PING_BYTE 'P' // Ping from server to UI.
-#define UI_PONG_BYTE 'K' // Keep alive ack from UI.
-
 #define UI_HANDSHAKE_TIMEOUT_DEFAULT_MS (3000)
 #define UI_PING_RETRY_BACKOFF_MS        (100)
 #define UI_PONG_TIMEOUT_DEFAULT_MS      (5000)
@@ -45,21 +37,6 @@ static uint64_t now_ms(void)
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
-
-// /// @brief Parse a uint64_t from a byte array in LITTLE-ENDIAN wire order.
-// /// @param p Pointer to the byte array.
-// /// @return Parsed uint64_t value.
-// static uint64_t parse_u64_le(const unsigned char *p)
-// {
-//         return ((uint64_t)p[0])       |
-//                ((uint64_t)p[1] << 8)  |
-//                ((uint64_t)p[2] << 16) |
-//                ((uint64_t)p[3] << 24) |
-//                ((uint64_t)p[4] << 32) |
-//                ((uint64_t)p[5] << 40) |
-//                ((uint64_t)p[6] << 48) |
-//                ((uint64_t)p[7] << 56);
-// }
 
 /// @brief Update last transaction time on RX.
 /// @param mgr UI manager.
@@ -187,34 +164,8 @@ static void hello_reset(ui_mgr_t *mgr)
         if (!mgr) {
                 return;
         }
-        // mgr->hello_buf_len = 0;
         mgr->hello_last_seen_wseq = 0;
-        // memset(mgr->hello_buf, 0, sizeof(mgr->hello_buf));
 }
-
-// /// @brief Parse the hello message from the UI.
-// /// @param mgr UI manager.
-// /// @return 0 on success, negative error code on failure.
-// static int hello_parse(ui_mgr_t *mgr)
-// {
-//         if (!mgr) {
-//                 return -EINVAL;
-//         }
-//         if (mgr->hello_buf_len < UI_HELLO_SIZE) {
-//                 return -EAGAIN;
-//         }
-
-//         if ((uint8_t)mgr->hello_buf[0] != (uint8_t)UI_HELLO_MAGIC0 ||
-//             (uint8_t)mgr->hello_buf[1] != (uint8_t)UI_HELLO_MAGIC1 ||
-//             (uint8_t)mgr->hello_buf[2] != (uint8_t)UI_HELLO_MAGIC2 ||
-//             (uint8_t)mgr->hello_buf[3] != (uint8_t)UI_HELLO_MAGIC3) {
-//                 mgr->hello_last_seen_wseq = 0;
-//                 return -EPROTO;
-//         }
-
-//         mgr->hello_last_seen_wseq = parse_u64_le((const unsigned char*)&mgr->hello_buf[4]);
-//         return 0;
-// }
 
 /// @brief Handle incoming data from the current UI connection during handshake or normal operation.
 /// @param mgr UI manager.

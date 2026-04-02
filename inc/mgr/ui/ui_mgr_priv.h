@@ -29,8 +29,6 @@ struct ui_mgr_s {
         int      await_pong;       ///< 1 if ping sent and waiting for PONG
         uint64_t pong_deadline_ms; ///< PONG deadline time in milliseconds
 
-        // char hello_buf[UI_HELLO_SIZE]; ///< Hello message buffer
-        // size_t hello_buf_len; ///< Current length of data in hello_buf
         uint64_t hello_last_seen_wseq; ///< Last seen wseq in hello message
 
         pthread_t runloop_tid;
