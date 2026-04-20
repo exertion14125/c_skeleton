@@ -44,6 +44,8 @@ void proc_user_mon_signal(int signo, siginfo_t *info, void *uctx)
         // int opt = info->si_value.sival_int;
         (void)info;
         // Process user signal.
+        printf("\r\n");
+        printf("Received user monitor signal: %d\r\n", signo);
         LOGI_T("MAIN", "Received user monitor signal: %d\r\n", signo);
         (void)ui_mgr_request_start(ui_mgr);
 }

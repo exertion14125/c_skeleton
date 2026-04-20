@@ -32,6 +32,7 @@ struct dispatch_s {
         pthread_cond_t cv_nonfull; ///< condition variable for non-full queue
 
         clockid_t cv_clock; ///< clock id used by cv_nonempty timedwait
+        
         uint32_t defer_active; ///< 1: last step ended with DEFER (queue not popped)
         uint64_t defer_until_ms; ///< 0: indefinite wait until wakeup, else absolute ms
 
@@ -40,8 +41,6 @@ struct dispatch_s {
 
         uint32_t drop_on_full; ///< 1: drop when full, 0: block producers
 
-        uint32_t cancel_to_fsm; ///< 1: DISPATCH_EV_CANCEL also goes to fsm_step
-        uint32_t cancel_req_to_fsm; ///< 1: DISPATCH_EV_CANCEL_REQ also goes to fsm_step
         dispatch_cancel_ovf_policy_t cancel_ovf_policy; ///< policy for cancel table overflow
 
         fsm_event_t ev_cancel;     ///< injected cancel-all event id
@@ -52,11 +51,7 @@ struct dispatch_s {
         cancel_ent_t *cancel_tab; ///< cancellation table
         uint32_t cancel_tab_cap; ///< capacity of the cancellation table
 
-        fsm_t *fsm; ///< FSM to dispatch events to
-        void *fsm_ctx; ///< context for the FSM
-
         dispatch_policy_t policy; ///< copied
-
         dispatch_observer_t observer; ///< observe-only callbacks (optional)
 };
 
@@ -105,15 +100,15 @@ static void emit_cancel_req(dispatch_t *d, uint32_t req_id, uint64_t epoch)
 /// @brief Emit dispatch event to observer
 /// @param d Pointer to the dispatcher
 /// @param evt Pointer to the dispatched event
-/// @param fsm_rc FSM return code after processing the event
-static void emit_dispatch(dispatch_t *d, const dispatch_evt_t *evt, int32_t fsm_rc)
+/// @param rc Return code after processing the event
+static void emit_dispatch(dispatch_t *d, const dispatch_evt_t *evt, int32_t rc)
 {
         if (!d || !evt) {
                 return;
         }
         if (d->observer.vtbl && d->observer.vtbl->on_dispatch) {
                 d->observer.vtbl->on_dispatch(d->observer.user,
-                        (int32_t)evt->ev, (uint32_t)evt->req_id, fsm_rc);
+                        (int32_t)evt->ev, (uint32_t)evt->req_id, rc);
         }
 }
 
@@ -279,7 +274,9 @@ static int cancel_tab_insert_locked(dispatch_t *d, uint32_t req_id, uint64_t epo
 {
         uint32_t i, idx;
 
-        if (!d->cancel_tab || d->cancel_tab_cap == 0) return 0;
+        if (!d->cancel_tab || d->cancel_tab_cap == 0) {
+                return 0;
+        }
 
         idx = h32(req_id) % d->cancel_tab_cap;
         for (i = 0; i < d->cancel_tab_cap; ++i) {
@@ -295,6 +292,7 @@ static int cancel_tab_insert_locked(dispatch_t *d, uint32_t req_id, uint64_t epo
         if (d->cancel_ovf_policy == DISPATCH_CANCEL_OVF_IGN_NEW) {
                 return 0;
         }
+
         if (d->cancel_ovf_policy == DISPATCH_CANCEL_OVF_RESET_ALL) {
                 memset(d->cancel_tab, 0, sizeof(cancel_ent_t) * d->cancel_tab_cap);
                 /* insert at hashed slot */
@@ -303,6 +301,7 @@ static int cancel_tab_insert_locked(dispatch_t *d, uint32_t req_id, uint64_t epo
                 d->cancel_tab[idx].epoch = epoch;
                 return 1;
         }
+        
         d->cancel_tab[idx].valid = 1;
         d->cancel_tab[idx].req_id = req_id;
         d->cancel_tab[idx].epoch = epoch;
@@ -332,14 +331,13 @@ void destroy_dispatch(dispatch_t **pd)
         pthread_mutex_destroy(&d->mtx);
         pthread_cond_destroy(&d->cv_nonempty);
         pthread_cond_destroy(&d->cv_nonfull);
-        
+
         if (d->cancel_tab) {
                 free(d->cancel_tab);
                 d->cancel_tab = NULL;
         }
 
         memset(d, 0, sizeof(*d));
-
         free(d);
         *pd = NULL;
 }
@@ -365,25 +363,24 @@ void dispatch_set_observer(dispatch_t *d, const dispatch_observer_t *observer)
 /// @param d Pointer to the dispatcher structure
 /// @param qmem Memory for the event queue
 /// @param qcap Capacity of the event queue
-/// @param fsm Pointer to the FSM
-/// @param fsm_ctx Context for the FSM
 /// @param policy Dispatch policy
 /// @param observer Dispatch observer callbacks (optional)
 /// @param cfg Dispatcher configuration (optional)
 /// @return 0 on success, -1 on failure
-int dispatch_init(dispatch_t *d, dispatch_qnode_t *qmem, uint32_t qcap, fsm_t *fsm, void *fsm_ctx,
-                       const dispatch_policy_t *policy, const dispatch_observer_t *observer, const dispatch_cfg_t *cfg)
+int dispatch_init(dispatch_t *d, 
+                dispatch_qnode_t *qmem, 
+                uint32_t qcap,
+                const dispatch_policy_t *policy, 
+                const dispatch_observer_t *observer /* optional */,
+                const dispatch_cfg_t *cfg /* optional */)
 {
-        if (!d || !qmem || qcap < 2 || !fsm || !policy || !policy->decide) {
+        if (!d || !qmem || qcap < 2 || !policy || !policy->decide) {
                 return -1;
         }
 
         memset(d, 0, sizeof(*d));
         d->q = qmem;
         d->cap = qcap;
-
-        d->fsm = fsm;
-        d->fsm_ctx = fsm_ctx;
         d->policy = *policy;
 
         if (observer) {
@@ -391,19 +388,12 @@ int dispatch_init(dispatch_t *d, dispatch_qnode_t *qmem, uint32_t qcap, fsm_t *f
         }
 
         d->drop_on_full = 1;
-        if (cfg) {
-                d->drop_on_full = (cfg->drop_on_full ? 1U : 0U);
-        }
-
-        d->cancel_to_fsm = 0;
-        d->cancel_req_to_fsm = 0;
         d->cancel_ovf_policy = DISPATCH_CANCEL_OVF_OVWRITE_SLOT;
         d->ev_cancel = DISPATCH_EV_CANCEL;
         d->ev_cancel_req = DISPATCH_EV_CANCEL_REQ;
 
         if (cfg) {
-                d->cancel_to_fsm = (cfg->cancel_to_fsm ? 1U : 0U);
-                d->cancel_req_to_fsm = (cfg->cancel_req_to_fsm ? 1U : 0U);
+                d->drop_on_full = (cfg->drop_on_full ? 1U : 0U);
                 d->cancel_ovf_policy = cfg->cancel_ovf_policy;
                 if (cfg->ev_cancel != 0) {
                         d->ev_cancel = cfg->ev_cancel;
@@ -411,7 +401,7 @@ int dispatch_init(dispatch_t *d, dispatch_qnode_t *qmem, uint32_t qcap, fsm_t *f
                 if (cfg->ev_cancel_req != 0) {
                         d->ev_cancel_req = cfg->ev_cancel_req;
                 }
-        }    
+        }
 
         d->active_epoch = 1;
         d->defer_active = 0;
@@ -424,6 +414,7 @@ int dispatch_init(dispatch_t *d, dispatch_qnode_t *qmem, uint32_t qcap, fsm_t *f
         } else {
                 d->cancel_tab_cap = DISPATCH_CANCEL_TAB_DEFAULT;
         }
+
         d->cancel_tab = (cancel_ent_t *)calloc(d->cancel_tab_cap, sizeof(cancel_ent_t));
         if (!d->cancel_tab) {
                 return -1;
@@ -433,18 +424,20 @@ int dispatch_init(dispatch_t *d, dispatch_qnode_t *qmem, uint32_t qcap, fsm_t *f
         
         d->cv_clock = CLOCK_REALTIME;
 #if defined(CLOCK_MONOTONIC) && defined(_POSIX_CLOCK_SELECTION)
-        //Prefer MONOTONIC for timed waits: immune to wall-clock adjustments */
-        pthread_condattr_t attr;
-        if (pthread_condattr_init(&attr) == 0) {
-                if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0) {
-                        d->cv_clock = CLOCK_MONOTONIC;
+        {
+                //Prefer MONOTONIC for timed waits: immune to wall-clock adjustments */
+                pthread_condattr_t attr;
+                if (pthread_condattr_init(&attr) == 0) {
+                        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0) {
+                                d->cv_clock = CLOCK_MONOTONIC;
+                        }
+                        (void)pthread_cond_init(&d->cv_nonempty, &attr);
+                        (void)pthread_cond_init(&d->cv_nonfull, &attr);
+                        (void)pthread_condattr_destroy(&attr);
+                } else {
+                        pthread_cond_init(&d->cv_nonempty, 0);
+                        pthread_cond_init(&d->cv_nonfull, 0);
                 }
-                (void)pthread_cond_init(&d->cv_nonempty, &attr);
-                (void)pthread_cond_init(&d->cv_nonfull, &attr);
-                (void)pthread_condattr_destroy(&attr);
-        } else {
-                pthread_cond_init(&d->cv_nonempty, 0);
-                pthread_cond_init(&d->cv_nonfull, 0);
         }
 #else
         pthread_cond_init(&d->cv_nonempty, 0);
@@ -487,191 +480,11 @@ int dispatch_push(dispatch_t *d, const dispatch_evt_t *evt)
         return 1;
 }
 
-/// @brief Dispatch step: process events according to the policy
-/// @param d Pointer to the dispatcher structure
-/// @return Number of events processed
-int32_t dispatch_step(dispatch_t *d, uint32_t budget)
-{
-        uint32_t done = 0;
-
-        if (!d || !d->fsm) {
-                return -1;
-        }
-
-        if (budget == 0) {
-                if (d->policy.budget) {
-                        budget = d->policy.budget(d->policy.user, d);
-                }
-                if (budget == 0) {
-                        budget = 1; /// default budget
-                }
-        }
-
-        while (done < budget) {
-                dispatch_qnode_t node;
-                uint32_t head_idx = 0;
-                int got;
-
-                uint64_t active_epoch = 0;
-                int epoch_mismatch = 0;
-                int req_canceled = 0;
-
-                //=== queue head peek (not pop)
-                pthread_mutex_lock(&d->mtx);
-                got = peek_one_locked(d, &node, &head_idx);
-                if (got) {
-                        active_epoch   = d->active_epoch;
-                        epoch_mismatch = (node.epoch != active_epoch);
-                        req_canceled   = is_req_canceled_locked(d, node.evt.req_id);
-                }
-                pthread_mutex_unlock(&d->mtx);
-
-                if (!got) {
-                        break; /// queue empty
-                }
-
-                //=== drop condition: epoch mismatch
-                if (epoch_mismatch) {
-                        emit_drop(d, DISPATCH_OBS_DROP_EPOCH, &node.evt);
-
-                        pthread_mutex_lock(&d->mtx);
-                        /* any successful pop clears defer (wait-side should not be stuck on stale defer) */
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;                        
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-
-                        done++;
-                        continue;
-                }
-
-                //=== drop condition: request canceled
-                if (req_canceled) {
-                        emit_drop(d, DISPATCH_OBS_DROP_REQ, &node.evt);
-
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;                        
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-
-                        done++;
-                        continue;
-                }
-
-                //=== control events (cancel all / cancel req)
-                if (node.evt.ev == d->ev_cancel) {
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;                              
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-
-                        /// cancel_all은 API에서 epoch 증가 후 이벤트를 push하는 것을 전제로 함.
-                        /// 여기서는 관측 + (옵션) fsm 전달만 수행한다.
-                        emit_cancel_all(d, active_epoch);
-
-                        if (d->cancel_to_fsm) {
-                                (void)fsm_step(d->fsm, d->fsm_ctx, node.evt.ev);
-                        }
-
-                        done++;
-                        continue;
-                }
-
-                if (node.evt.ev == d->ev_cancel_req) {
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;                        
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-
-                        /* cancel_req는 API에서 cancel table 반영 후 이벤트를 push하는 것을 전제로 함 */
-                        emit_cancel_req(d, (uint32_t)node.evt.a, active_epoch);
-
-                        if (d->cancel_req_to_fsm) {
-                                (void)fsm_step(d->fsm, d->fsm_ctx, node.evt.ev);
-                        }
-
-                        done++;
-                        continue;
-                }
-
-                //=== policy decide (DEFER / DROP / CONSUME)
-                dispatch_decision_t dec;
-                uint32_t defer_wait_ms = 0;
-                int32_t  defer_reason  = 0;
-
-                dec = d->policy.decide(d->policy.user, d, &node.evt);
-                if (dec != DISPATCH_DECIDE_CONSUME &&
-                    dec != DISPATCH_DECIDE_DROP &&
-                    dec != DISPATCH_DECIDE_DEFER) {
-                        emit_drop(d, DISPATCH_OBS_DROP_POLICY, &node.evt);
-
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-                        done++;
-                        continue;
-                }
-                if (dec == DISPATCH_DECIDE_DEFER) {
-                        if (d->policy.defer_wait_ms) {
-                                defer_wait_ms = d->policy.defer_wait_ms( d->policy.user, d, &node.evt);
-                        }
-                        if (d->policy.defer_reason) {
-                                defer_reason = d->policy.defer_reason( d->policy.user, d, &node.evt);
-                        }
-                        /* defer flags MUST be updated under lock (wait thread reads them under lock) */
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 1;
-                        /* latch current wake sequence at the moment defer becomes active */
-                        d->defer_seq = d->wake_seq;
-                        if (defer_wait_ms == 0) {
-                                d->defer_until_ms = 0; /* indefinite */
-                        } else {
-                                uint64_t now = now_ms_clk(d->cv_clock);
-                                d->defer_until_ms = now + (uint64_t)defer_wait_ms;
-                        }
-                        pthread_mutex_unlock(&d->mtx);
-                        emit_defer(d, (int32_t)node.evt.ev, node.evt.req_id, defer_wait_ms, defer_reason);
-                        break; // exit dispatch_step without popping
-                }
-                if (dec == DISPATCH_DECIDE_DROP) {
-                        emit_drop(d, DISPATCH_OBS_DROP_POLICY, &node.evt);
-                        
-                        pthread_mutex_lock(&d->mtx);
-                        d->defer_active = 0;
-                        d->defer_until_ms = 0;
-                        (void)pop_commit_locked(d, head_idx);
-                        pthread_mutex_unlock(&d->mtx);
-
-                        done++;
-                        continue;
-                }
-                // === 6) CONSUME 
-                pthread_mutex_lock(&d->mtx);
-                d->defer_active = 0;
-                d->defer_until_ms = 0;
-                (void)pop_commit_locked(d, head_idx);
-                pthread_mutex_unlock(&d->mtx);
-
-                fsm_step_rc_t rc = fsm_step(d->fsm, d->fsm_ctx, node.evt.ev);
-                emit_dispatch(d, &node.evt, (int32_t)rc);
-
-                done++;
-        }
-
-        return (int32_t)done;
-}
-
-
 /// @brief Wait for events and perform a dispatch step
 /// @param d Pointer to the dispatcher structure
 /// @param wait_timeout_ms Timeout in milliseconds (0 for infinite wait)
 /// @return Number of events processed
-uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
+uint32_t dispatch_wait(dispatch_t *d, uint32_t wait_timeout_ms)
 {
         int r = 0;
         int timedout = 0;
@@ -679,7 +492,7 @@ uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
         uint64_t deadline_ms = 0;
 
         if (!d) {
-                return 0;
+                return 0U;
         }
 
         /// Strict total-timeout semantics:
@@ -710,10 +523,11 @@ uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
                                 timedout = 1;
                                 break;
                         }
-                }                
+                }
                 if (q_is_empty(d)) {
                         if (wait_timeout_ms == 0) {
                                 r = pthread_cond_wait(&d->cv_nonempty, &d->mtx);
+                                (void)r;
                         } else {
                                 struct timespec ts;
                                 make_abs_timespec_ms(&ts, remaining_ms, d->cv_clock);
@@ -727,7 +541,7 @@ uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
                 }
                 /// queue is non-empty
                 if (d->defer_active) {
-                        uint32_t wms = (wait_timeout_ms == 0) ? 0 : remaining_ms;
+                        uint32_t wms = (wait_timeout_ms == 0) ? 0U : remaining_ms;
 
                         if (d->defer_until_ms != 0) {
                                 uint64_t now = now_ms_clk(d->cv_clock);
@@ -775,7 +589,7 @@ uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
                         if (wms == 0) {
                                 /// Defensive: avoid tight loop on unexpected 0ms slice.
                                 /// (e.g., rem cast/rounding edge cases)
-                                wms = 1;
+                                wms = 1U;
                                 //continue;
                         }
                         struct timespec ts;
@@ -805,8 +619,192 @@ uint32_t dispatch_wait_and_step(dispatch_t *d, uint32_t wait_timeout_ms)
         if (timedout) {
                 return 0U;
         }
-        int n = dispatch_step(d, 0);
-        return (n > 0) ? (uint32_t)n : 0U;
+        return 1U;
+}
+
+/// @brief Pop an event from the dispatcher and get the dispatch decision
+/// @param d Pointer to the dispatcher structure
+/// @param out Pointer to store the popped event and related info
+/// @return dispatch_pop_rc_t code indicating the result of the pop operation
+dispatch_pop_rc_t dispatch_pop(dispatch_t *d, dispatch_pop_result_t *out)
+{
+        dispatch_qnode_t node;
+        uint32_t head_idx = 0;
+        int got;
+        uint64_t active_epoch = 0;
+        int epoch_mismatch = 0;
+        int req_canceled = 0;
+        dispatch_decision_t dec;
+        uint32_t defer_wait_ms = 0;
+        int32_t defer_reason = 0;
+
+        if (!d || !out) {
+                return DISPATCH_POP_ERR;
+        }
+
+        memset(out, 0, sizeof(*out));
+
+        pthread_mutex_lock(&d->mtx);
+        got = peek_one_locked(d, &node, &head_idx);
+        if (got) {
+                active_epoch = d->active_epoch;
+                epoch_mismatch = (node.epoch != active_epoch);
+                req_canceled = is_req_canceled_locked(d, node.evt.req_id);
+        }
+        pthread_mutex_unlock(&d->mtx);
+
+        if (!got) {
+                out->rc = DISPATCH_POP_EMPTY;
+                return out->rc;
+        }
+
+        if (epoch_mismatch) {
+                emit_drop(d, DISPATCH_OBS_DROP_EPOCH, &node.evt);
+
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_DROP_EPOCH;
+                return out->rc;
+        }
+
+        if (req_canceled) {
+                emit_drop(d, DISPATCH_OBS_DROP_REQ, &node.evt);
+
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_DROP_REQ;
+                return out->rc;
+        }
+
+        if (node.evt.ev == d->ev_cancel) {
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                emit_cancel_all(d, active_epoch);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_CTRL_CANCEL_ALL;
+                return out->rc;
+        }
+
+        if (node.evt.ev == d->ev_cancel_req) {
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                emit_cancel_req(d, (uint32_t)node.evt.a, active_epoch);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_CTRL_CANCEL_REQ;
+                return out->rc;
+        }
+
+        dec = d->policy.decide(d->policy.user, d, &node.evt);
+        if (dec != DISPATCH_DECIDE_CONSUME &&
+            dec != DISPATCH_DECIDE_DROP &&
+            dec != DISPATCH_DECIDE_DEFER) {
+                emit_drop(d, DISPATCH_OBS_DROP_POLICY, &node.evt);
+
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_DROP_POLICY;
+                return out->rc;
+        }
+
+        if (dec == DISPATCH_DECIDE_DEFER) {
+                if (d->policy.defer_wait_ms) {
+                        defer_wait_ms = d->policy.defer_wait_ms(d->policy.user, d, &node.evt);
+                }
+                if (d->policy.defer_reason) {
+                        defer_reason = d->policy.defer_reason(d->policy.user, d, &node.evt);
+                }
+
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 1;
+                d->defer_seq = d->wake_seq;
+                if (defer_wait_ms == 0) {
+                        d->defer_until_ms = 0;
+                } else {
+                        uint64_t now = now_ms_clk(d->cv_clock);
+                        d->defer_until_ms = now + (uint64_t)defer_wait_ms;
+                }
+                pthread_mutex_unlock(&d->mtx);
+
+                emit_defer(d, (int32_t)node.evt.ev, node.evt.req_id, defer_wait_ms, defer_reason);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->defer_wait_ms = defer_wait_ms;
+                out->defer_reason = defer_reason;
+                out->rc = DISPATCH_POP_DEFER;
+                return out->rc;
+        }
+
+        if (dec == DISPATCH_DECIDE_DROP) {
+                emit_drop(d, DISPATCH_OBS_DROP_POLICY, &node.evt);
+
+                pthread_mutex_lock(&d->mtx);
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
+                (void)pop_commit_locked(d, head_idx);
+                pthread_mutex_unlock(&d->mtx);
+
+                out->evt = node.evt;
+                out->epoch = node.epoch;
+                out->rc = DISPATCH_POP_DROP_POLICY;
+                return out->rc;
+        }
+
+        pthread_mutex_lock(&d->mtx);
+        d->defer_active = 0;
+        d->defer_until_ms = 0;
+        (void)pop_commit_locked(d, head_idx);
+        pthread_mutex_unlock(&d->mtx);
+
+        out->evt = node.evt;
+        out->epoch = node.epoch;
+        out->rc = DISPATCH_POP_OK;
+
+        emit_dispatch(d, &node.evt, (int32_t)DISPATCH_POP_OK);
+        return out->rc;
+}
+
+/// @brief Wake up consumer threads (e.g., after canceling requests or changing state)
+/// @param d Pointer to the dispatcher structure
+void dispatch_wakeup(dispatch_t *d)
+{
+        if (!d) {
+                return;
+        }
+        pthread_mutex_lock(&d->mtx);
+        d->wake_seq++;
+        pthread_cond_broadcast(&d->cv_nonempty);
+        pthread_mutex_unlock(&d->mtx);
 }
 
 /// @brief Get the number of used slots in the dispatcher's queue
@@ -831,6 +829,22 @@ uint32_t dispatch_q_used(dispatch_t *d)
 uint32_t dispatch_q_cap(dispatch_t *d)
 {
         return d ? d->cap : 0;
+}
+
+/// @brief Get the number of used slots in the dispatcher's queue (thread-safe)
+/// @param d Pointer to the dispatcher structure
+/// @return Number of used slots
+uint32_t dispatch_get_used(const dispatch_t *d)
+{
+        return dispatch_q_used((dispatch_t *)d);
+}
+
+/// @brief Get the capacity of the dispatcher's queue (thread-safe)
+/// @param d Pointer to the dispatcher structure
+/// @return Capacity of the queue
+uint32_t dispatch_get_cap(const dispatch_t *d)
+{
+        return dispatch_q_cap((dispatch_t *)d);
 }
 
 /// @brief Get the current active epoch of the dispatcher
@@ -879,18 +893,6 @@ void dispatch_cancel_req(dispatch_t *d, uint32_t req_id)
         (void)dispatch_push(d, &ev);
 }
 
-void dispatch_wakeup(dispatch_t *d)
-{
-        if (!d) {
-                return;
-        }
-        pthread_mutex_lock(&d->mtx);
-        /* wake up consumer thread (used for DEFER) */
-        d->wake_seq++;
-        pthread_cond_broadcast(&d->cv_nonempty);
-        pthread_mutex_unlock(&d->mtx);
-}
-
 /// @brief Cancel all requests in the dispatcher
 /// @param d Pointer to the dispatcher structure
 /// @param flush_q 1: flush the queue, 0: keep the queue
@@ -907,6 +909,8 @@ void dispatch_cancel_all(dispatch_t *d, bool flush_q, uint32_t push_cancel_event
 
         if (flush_q) {
                 d->head = d->tail;
+                d->defer_active = 0;
+                d->defer_until_ms = 0;
                 pthread_cond_broadcast(&d->cv_nonfull);
         }
 

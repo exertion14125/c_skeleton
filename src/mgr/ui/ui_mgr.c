@@ -28,6 +28,47 @@
 #define UI_PING_RETRY_BACKOFF_MS        (100)
 #define UI_PONG_TIMEOUT_DEFAULT_MS      (5000)
 
+//===== FSM support =====//
+static int ui_guard_always(void *ctx, fsm_state_t st, fsm_event_t ev, fsm_state_t next)
+{
+        (void)ctx;
+        (void)st;
+        (void)ev;
+        (void)next;
+        return 1;
+}
+
+static int ui_mgr_build_fsm_spec(ui_mgr_t *mgr)
+{
+        static const fsm_trans_t ui_tbl[] = {
+                { UI_ST_INIT,       UI_MGR_EV_START,      UI_ST_IDLE,       ui_guard_always, NULL },
+                { UI_ST_IDLE,       UI_MGR_EV_OPEN_REQ,   UI_ST_HANDSHAKE,  ui_guard_always, NULL },
+                { UI_ST_HANDSHAKE,  UI_MGR_EV_OPEN_OK,    UI_ST_CONNECTED,  ui_guard_always, NULL },
+                { UI_ST_HANDSHAKE,  UI_MGR_EV_OPEN_FAIL,  UI_ST_IDLE,       ui_guard_always, NULL },
+                { UI_ST_CONNECTED,  UI_MGR_EV_RESET,      UI_ST_IDLE,       ui_guard_always, NULL },
+                { UI_ST_INIT,       UI_MGR_EV_SHUTDOWN,   UI_ST_SHUTDOWN,   ui_guard_always, NULL },
+                { UI_ST_IDLE,       UI_MGR_EV_SHUTDOWN,   UI_ST_SHUTDOWN,   ui_guard_always, NULL },
+                { UI_ST_HANDSHAKE,  UI_MGR_EV_SHUTDOWN,   UI_ST_SHUTDOWN,   ui_guard_always, NULL },
+                { UI_ST_CONNECTED,  UI_MGR_EV_SHUTDOWN,   UI_ST_SHUTDOWN,   ui_guard_always, NULL }
+        };
+        static const fsm_spec_t ui_spec = {
+                ui_tbl,
+                (uint32_t)(sizeof(ui_tbl) / sizeof(ui_tbl[0])),
+                UI_ST_INIT
+        };
+
+        if (!mgr || !mgr->fsm) {
+                return -EINVAL;
+        }
+
+        if (fsm_init(mgr->fsm, &ui_spec, NULL) != 0) {
+                return -1;
+        }
+
+        return 0;
+}
+
+//===== utility functions =====//
 
 /// @brief Get current time in milliseconds.
 /// @return Current time in milliseconds.
@@ -43,8 +84,11 @@ static uint64_t now_ms(void)
 /// @param now Current time in milliseconds.
 static void touch_rx(ui_mgr_t *mgr, uint64_t now)
 {
-        if (!mgr) return;
-        mgr->last_rx_ms = now;
+        if (!mgr) {
+                return;
+        }
+        mgr->ctx.last_rx_ms = now;
+        mgr->ctx.last_alive_ms = now;
 }
 
 /// @brief Update last transaction time on TX.
@@ -52,10 +96,11 @@ static void touch_rx(ui_mgr_t *mgr, uint64_t now)
 /// @param now Current time in milliseconds.
 static void touch_tx(ui_mgr_t *mgr, uint64_t now)
 {
-        if (!mgr) return;
-        mgr->last_tx_ms = now;
-        mgr->await_pong = 0;
-        mgr->pong_deadline_ms = 0;
+        if (!mgr) {
+                return;
+        }
+        mgr->ctx.last_tx_ms = now;
+        mgr->ctx.last_alive_ms = now;
 }
 
 /// @brief Compare two integers and return the minimum.
@@ -66,6 +111,32 @@ static int min_int(int a, int b)
 {
         return (a < b) ? a : b;
 }
+
+//===== state helpers =====//
+
+/// @brief Get the current UI manager state.
+/// @param mgr UI manager.
+/// @return Current state of the UI manager.
+static ui_mgr_state_t ui_state(const ui_mgr_t *mgr)
+{
+        if (!mgr || !mgr->fsm) {
+                return UI_ST_SHUTDOWN;
+        }
+        return (ui_mgr_state_t)fsm_get_state(mgr->fsm);
+}
+
+/// @brief Set the UI manager state.
+/// @param mgr UI manager.
+/// @param st New state to set.
+static void ui_set_state(ui_mgr_t *mgr, ui_mgr_state_t st)
+{
+        if (!mgr || !mgr->fsm) {
+                return;
+        }
+        fsm_force_state(mgr->fsm, (fsm_state_t)st);
+}
+
+//===== cfg/policy helpers =====//
 
 /// @brief Get handshake timeout in ms.
 /// @param mgr UI manager.
@@ -84,6 +155,22 @@ static int handshake_timeout_ms(const ui_mgr_t *mgr)
         return UI_HANDSHAKE_TIMEOUT_DEFAULT_MS;
 }
 
+/// @brief Get PONG timeout in ms.
+/// @param mgr UI manager.
+/// @return PONG timeout in milliseconds.
+static int pong_timeout_ms(const ui_mgr_t *mgr)
+{
+        if (!mgr) {
+                return UI_PONG_TIMEOUT_DEFAULT_MS;
+        }
+
+        if (mgr->cfg.pong_timeout_ms > 0) {
+                return mgr->cfg.pong_timeout_ms;
+        }
+
+        return UI_PONG_TIMEOUT_DEFAULT_MS;
+}
+
 /// @brief Check if handshake has timed out.
 /// @param mgr UI manager.
 /// @param now Current time in milliseconds.
@@ -93,13 +180,16 @@ static int handshake_timed_out(const ui_mgr_t *mgr, uint64_t now)
         if (!mgr) {
                 return 0;
         }
-        if (mgr->state != UI_ST_HANDSHAKE) {
+
+        if (ui_state(mgr) != UI_ST_HANDSHAKE) {
                 return 0;
         }
-        if (mgr->attached_ms == 0) { /* handshake begin not recorded */
+
+        if (mgr->ctx.last_alive_ms == 0ULL) {
                 return 0;
         }
-        return ((now - mgr->attached_ms) > (uint64_t)handshake_timeout_ms(mgr)) ? 1 : 0;
+
+        return ((now - mgr->ctx.last_alive_ms) > (uint64_t)handshake_timeout_ms(mgr)) ? 1 : 0;
 }
 
 /// @brief Clamps poll timeout to the next scheduled ping to prevent interval drift.
@@ -111,32 +201,42 @@ static int handshake_timed_out(const ui_mgr_t *mgr, uint64_t now)
 /// @note If ping is overdue, timeout is set to 0 for immediate processing.
 static int clamp_poll_timeout(ui_mgr_t *mgr, int timeout_ms, uint64_t now)
 {
+        uint64_t next_due;
+        int ms_until;
+
         if (!mgr) {
                 return timeout_ms;
         }
+
         if (timeout_ms < 0) {
                 timeout_ms = mgr->cfg.poll_timeout_ms;
         }
 
-        if (mgr->state != UI_ST_CONNECTED) {
+        if (ui_state(mgr) != UI_ST_CONNECTED) {
                 return timeout_ms;
         }
+
         if (mgr->cfg.ping_interval_ms <= 0) {
                 return timeout_ms;
         }
-        
-        if (mgr->last_ping_ms == 0) { /// last_ping_ms is "next due time"
-                return 0; /// schedule immediate ping try
+
+        if (mgr->ctx.last_tx_ms == 0ULL) {
+                return 0;
         }
-        if (now >= mgr->last_ping_ms) {
-                return 0; /// due now
+
+        next_due = mgr->ctx.last_tx_ms + (uint64_t)mgr->cfg.ping_interval_ms;
+        if (now >= next_due) {
+                return 0;
         }
-        uint64_t diff = mgr->last_ping_ms - now;
-        int ms_until = (diff > (uint64_t)INT32_MAX) ? INT32_MAX : (int)diff;
+
+        if ((next_due - now) > 0x7fffffffULL) {
+                ms_until = 0x7fffffff;
+        } else {
+                ms_until = (int)(next_due - now);
+        }
+
         return min_int(timeout_ms, ms_until);
 }
-
-///===== internal functions =====///
 
 /// @brief Check if the current UI connection is stale.
 /// @param mgr UI manager.
@@ -150,12 +250,14 @@ static int is_stale(ui_mgr_t *mgr, uint64_t now)
         if (mgr->cfg.stale_timeout_ms <= 0) {
                 return 0;
         }
-        if (mgr->last_rx_ms == 0) {
+        if (mgr->ctx.last_rx_ms == 0ULL) {
                 return 0;
         }
-        return ((now - mgr->last_rx_ms) > (uint64_t)mgr->cfg.stale_timeout_ms) ? 1 : 0;
+        return ((now - mgr->ctx.last_rx_ms) >
+                (uint64_t)mgr->cfg.stale_timeout_ms) ? 1 : 0;
 }
 
+//===== protocol/session helpers =====//
 
 /// @brief Reset the hello buffer and related state.
 /// @param mgr UI manager.
@@ -164,7 +266,7 @@ static void hello_reset(ui_mgr_t *mgr)
         if (!mgr) {
                 return;
         }
-        mgr->hello_last_seen_wseq = 0;
+        mgr->proto.hello_last_seen_wseq = 0ULL;
 }
 
 /// @brief Handle incoming data from the current UI connection during handshake or normal operation.
@@ -184,9 +286,11 @@ static int handle_hello_frame(ui_mgr_t *mgr, const unsigned char *payload, size_
         }
 
         memcpy(&hello, payload, sizeof(hello));
-        mgr->hello_last_seen_wseq = hello.last_seen_wseq;
+        mgr->proto.hello_last_seen_wseq = hello.last_seen_wseq;
         return 0;
 }
+
+//===== callbacks =====//
 
 /// @brief Callback for UI detach event.
 /// @param mgr UI manager.
@@ -196,8 +300,8 @@ static void cb_detach(ui_mgr_t *mgr, int fd)
         if (!mgr) {
                 return;
         }
-        if (mgr->cb.on_detach) {
-                mgr->cb.on_detach(mgr->cb.user, fd);
+        if (mgr->notify_cb.on_detach) {
+                mgr->notify_cb.on_detach(mgr->notify_cb.user, fd);
         }
 }
 
@@ -211,12 +315,13 @@ static int cb_attach(ui_mgr_t *mgr, int fd, uint64_t last_seen_wseq)
         if (!mgr) {
                 return -EINVAL;
         }
-        if (!mgr->cb.on_attach) {
+        if (!mgr->notify_cb.on_attach) {
                 return 0;
         }
-        return mgr->cb.on_attach(mgr->cb.user, fd, last_seen_wseq);
+        return mgr->notify_cb.on_attach(mgr->notify_cb.user, fd, last_seen_wseq);
 }
 
+//=====  peer/session management =====//
 
 /// @brief Drop the current UI connection.
 /// @param mgr UI manager.
@@ -226,96 +331,23 @@ static void drop_ui(ui_mgr_t *mgr)
                 return;
         }
 
-        int cfd = ra_ui_uds_client_fd(mgr->srv);
+        int cfd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
 
         if (cfd >= 0) {
                 cb_detach(mgr, cfd);
         }
-        ra_ui_uds_drop_client(mgr->srv);
+        ra_ui_uds_drop_client(mgr->ra_uds_srv);
 
-        mgr->last_rx_ms = 0;
-        mgr->last_tx_ms = 0;
-        mgr->last_ping_ms = 0; ///next due time reset
-        mgr->attached_ms = 0;
-        mgr->await_pong = 0;
-        mgr->pong_deadline_ms = 0;
+        mgr->ctx.last_rx_ms = 0;
+        mgr->ctx.last_tx_ms = 0;
+        mgr->ctx.last_alive_ms = 0;
+        mgr->ctx.connected = 0;
+        mgr->proto.await_pong = 0;
+        mgr->proto.pong_deadline_ms = 0;
 
         hello_reset(mgr);
 
-        mgr->state = UI_ST_IDLE;
-}
-
-/// @brief New UI connection attach and initialize handshake.
-/// @param mgr UI manager.
-/// @param now Current time in milliseconds.
-/// @return 0 on success, 1 need more data, negative error code on failure.
-static int ui_rx_handshake(ui_mgr_t *mgr, uint64_t now)
-{
-        int fd;
-        unsigned char tmp[512];
-        ssize_t n;
-        ui_frame_hdr_t hdr;
-        unsigned char payload[UI_FRAME_PAYLOAD_MAX];
-        size_t payload_len;
-        int rc;
-
-        if (!mgr) {
-                return -EINVAL;
-        }
-
-        fd = ra_ui_uds_client_fd(mgr->srv);
-        if (fd < 0) {
-                return -EINVAL;
-        }
-
-        for (;;) {
-                n = ra_ui_uds_recv(fd, tmp, sizeof(tmp));
-                if (n == 0) {
-                        return -EPIPE;
-                }
-                if (n < 0) {
-                        int e = (int)(-n);
-                        if (e == EINTR) {
-                                continue;
-                        }
-                        if (e == EAGAIN || e == EWOULDBLOCK) {
-                                return 1; /* need more data */
-                        }
-                        return -e;
-                }
-
-                touch_rx(mgr, now);
-
-                rc = ui_proto_append_rx(&mgr->rx_buf, tmp, (size_t)n);
-                if (rc != 0) {
-                        return rc;
-                }
-
-                for (;;) {
-                        rc = ui_proto_try_parse(&mgr->rx_buf,
-                                                &hdr,
-                                                payload,
-                                                sizeof(payload),
-                                                &payload_len);
-                        if (rc == 1) {
-                                return 1; /* frame incomplete */
-                        }
-                        if (rc != 0) {
-                                return rc;
-                        }
-
-                        if (hdr.type != UI_FRAME_HELLO) {
-                                return -EPROTO;
-                        }
-
-                        rc = handle_hello_frame(mgr, payload, payload_len);
-                        if (rc != 0) {
-                                return rc;
-                        }
-
-                        return 0; /* hello frame complete */
-                }
-        }
+        ui_set_state(mgr, UI_ST_IDLE);
 }
 
 /// @brief Attach new UI connection (begin handshake).
@@ -325,14 +357,21 @@ static int ui_rx_handshake(ui_mgr_t *mgr, uint64_t now)
 static void attach_ui_begin(ui_mgr_t *mgr, int cfd, uint64_t now)
 {
         (void)cfd;
-        mgr->last_tx_ms = 0;
-        mgr->attached_ms = now; ///handshake begin timestamp
-        mgr->await_pong = 0;
-        mgr->pong_deadline_ms = 0;
+
+        mgr->ctx.last_tx_ms = 0;
+        mgr->ctx.last_alive_ms = now;
+        mgr->ctx.connected = 0;
+
+        mgr->proto.await_pong = 0;
+        mgr->proto.pong_deadline_ms = 0;
 
         hello_reset(mgr);
 
-        mgr->state = UI_ST_HANDSHAKE;
+        if (mgr->proto.rx_buf) {
+                ui_rx_buf_init(mgr->proto.rx_buf);
+        }
+
+        ui_set_state(mgr, UI_ST_HANDSHAKE);
 }
 
 /// @brief Finish UI connection attach after handshake.
@@ -341,17 +380,26 @@ static void attach_ui_begin(ui_mgr_t *mgr, int cfd, uint64_t now)
 /// @param now Current time in milliseconds.
 static void finish_attach(ui_mgr_t *mgr, int cfd, uint64_t now)
 {
-        int rc = cb_attach(mgr, cfd, mgr->hello_last_seen_wseq);
-        if (rc != 0) { //server rejected attach => drop
+int rc;
+
+        if (!mgr) {
+                return;
+        }
+
+        rc = cb_attach(mgr, cfd, mgr->proto.hello_last_seen_wseq);
+        if (rc != 0) {
                 drop_ui(mgr);
                 return;
         }
-        mgr->attached_ms = now;
+
+        mgr->ctx.connected = 1U;
+        mgr->ctx.last_alive_ms = now;
         touch_rx(mgr, now);
-        mgr->last_ping_ms = 0; ///next ping due time reset
-        mgr->await_pong = 0;
-        mgr->pong_deadline_ms = 0;
-        mgr->state = UI_ST_CONNECTED;
+
+        mgr->proto.await_pong = 0;
+        mgr->proto.pong_deadline_ms = 0ULL;
+
+        ui_set_state(mgr, UI_ST_CONNECTED);
 }
 
 /// @brief Check peer credentials of the connected UI client against the configured policy.
@@ -408,39 +456,36 @@ static int check_peer_cred(ui_mgr_t *mgr, int cfd)
 /// @param now Current time in milliseconds.
 static void handle_accept(ui_mgr_t *mgr, uint64_t now)
 {
-        if (!mgr) {
+        if (!mgr || !mgr->ra_uds_srv) {
                 return;
         }
 
-        int cfd = ra_ui_uds_accept(mgr->srv); /* accept only, does NOT set client_fd */
+        int cfd = ra_ui_uds_accept(mgr->ra_uds_srv); /* accept only, does NOT set client_fd */
         if (cfd < 0) {
                 if (cfd == -EAGAIN || cfd == -EWOULDBLOCK) {
                         return;
                 }
-                /* other accept error: ignore */
                 return;
         }
-        
+
         int vrc = check_peer_cred(mgr, cfd);
         if (vrc != 0) {
                 close(cfd);
                 return;
         }
 
-        int has = (ra_ui_uds_client_fd(mgr->srv) >= 0);
+        int has = (ra_ui_uds_client_fd(mgr->ra_uds_srv) >= 0);
 
         /* no existing client => set & begin handshake */
         if (!has) {
-                int rc = ra_ui_uds_set_client(mgr->srv, cfd);
+                int rc = ra_ui_uds_set_client(mgr->ra_uds_srv, cfd);
                 if (rc != 0) {
-                        /* unexpected: someone set client in between */
                         close(cfd);
                         return;
                 }
                 attach_ui_begin(mgr, cfd, now);
                 return;
         }
-
         /* has existing client */
         if (mgr->cfg.limit_policy == UI_LIMIT_REJECT) {
                 /* reject new connection */
@@ -461,7 +506,7 @@ static void handle_accept(ui_mgr_t *mgr, uint64_t now)
         drop_ui(mgr);
 
         /* now should be no client */
-        int rc = ra_ui_uds_set_client(mgr->srv, cfd);
+        int rc = ra_ui_uds_set_client(mgr->ra_uds_srv, cfd);
         if (rc != 0) {
                 /* if still -EBUSY something is wrong; close new fd */
                 close(cfd);
@@ -469,6 +514,80 @@ static void handle_accept(ui_mgr_t *mgr, uint64_t now)
         }
 
         attach_ui_begin(mgr, cfd, now);
+}
+
+//===== rx handling =====//
+
+/// @brief Handle incoming data from the current UI connection during handshake phase.
+/// @param mgr UI manager.
+/// @param now Current time in milliseconds.
+/// @return 0 on successful handshake completion, 1 if more data is needed to complete handshake, negative error code on failure.
+static int ui_rx_handshake(ui_mgr_t *mgr, uint64_t now)
+{
+        int fd;
+        unsigned char tmp[512];
+        ssize_t n;
+        ui_frame_hdr_t hdr;
+        unsigned char payload[UI_FRAME_PAYLOAD_MAX];
+        size_t payload_len;
+        int rc;
+
+        if (!mgr || !mgr->ra_uds_srv || !mgr->proto.rx_buf) {
+                return -EINVAL;
+        }
+
+        fd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
+        if (fd < 0) {
+                return -EINVAL;
+        }
+
+        for (;;) {
+                n = ra_ui_uds_recv(fd, tmp, sizeof(tmp));
+                if (n == 0) {
+                        return -EPIPE;
+                }
+                if (n < 0) {
+                        int e = (int)(-n);
+                        if (e == EINTR) {
+                                continue;
+                        }
+                        if (e == EAGAIN || e == EWOULDBLOCK) {
+                                return 1; /* more data needed */
+                        }
+                        return -e;
+                }
+
+                touch_rx(mgr, now);
+
+                rc = ui_proto_append_rx(mgr->proto.rx_buf, tmp, (size_t)n);
+                if (rc != 0) {
+                        return rc;
+                }
+
+                for (;;) {
+                        rc = ui_proto_try_parse(mgr->proto.rx_buf,
+                                                &hdr,
+                                                payload,
+                                                sizeof(payload),
+                                                &payload_len);
+                        if (rc == 1) {
+                                return 1; /* more data needed */
+                        }
+                        if (rc < 0) {
+                                return rc;
+                        }
+
+                        if (hdr.type != UI_FRAME_HELLO) {
+                                return -EPROTO;
+                        }
+
+                        rc = handle_hello_frame(mgr, payload, payload_len);
+                        if (rc != 0) {
+                                return rc;
+                        }
+                        return 0; /* success */
+                }
+        }
 }
 
 /// @brief Handle incoming data from the current UI connection.
@@ -490,7 +609,7 @@ static void handle_ui_rx(ui_mgr_t *mgr, uint64_t now)
                 return;
         }
 
-        fd = ra_ui_uds_client_fd(mgr->srv);
+        fd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
         if (fd < 0) {
                 return;
         }
@@ -515,14 +634,14 @@ static void handle_ui_rx(ui_mgr_t *mgr, uint64_t now)
 
                 touch_rx(mgr, now);
 
-                rc = ui_proto_append_rx(&mgr->rx_buf, tmp, (size_t)n);
+                rc = ui_proto_append_rx(mgr->proto.rx_buf, tmp, (size_t)n);
                 if (rc != 0) {
                         drop_ui(mgr);
                         return;
                 }
 
                 while(1) {
-                        rc = ui_proto_try_parse(&mgr->rx_buf,
+                        rc = ui_proto_try_parse(mgr->proto.rx_buf,
                                                 &hdr,
                                                 payload,
                                                 sizeof(payload),
@@ -537,7 +656,7 @@ static void handle_ui_rx(ui_mgr_t *mgr, uint64_t now)
 
                         switch (hdr.type) {
                         case UI_FRAME_HELLO:
-                                if (mgr->state == UI_ST_HANDSHAKE) {
+                                if (ui_state(mgr) == UI_ST_HANDSHAKE) {
                                         if (handle_hello_frame(mgr, payload, payload_len) == 0) {
                                                 finish_attach(mgr, fd, now);
                                         } else {
@@ -548,17 +667,19 @@ static void handle_ui_rx(ui_mgr_t *mgr, uint64_t now)
                                 break;
 
                         case UI_FRAME_PONG:
-                                mgr->await_pong = 0;
-                                mgr->pong_deadline_ms = 0;
+                                mgr->proto.await_pong = 0;
+                                mgr->proto.pong_deadline_ms = 0;
                                 break;
 
                         default:
-                                /* 1차 패치에서는 unknown frame 무시 또는 로깅 */
+                                /* current version: ignore unknown/unsupported inbound frame */
                                 break;
                         }
                 }
         }
 }
+
+//=====  ping/stale =====//
 
 /// @brief Check if a ping is due to be sent.
 /// @param mgr UI manager.
@@ -572,14 +693,14 @@ static int ping_due(const ui_mgr_t *mgr, uint64_t now)
         if (mgr->cfg.ping_interval_ms <= 0) {
                 return 0;
         }
-        if (mgr->state != UI_ST_CONNECTED) {
+        if (ui_state(mgr) != UI_ST_CONNECTED) {
                 return 0;
         }
 
-        if (mgr->last_ping_ms == 0) {
+        if (mgr->ctx.last_tx_ms  == 0) {
                 return 1; ///immediate first ping
         }
-        return (now >= mgr->last_ping_ms) ? 1 : 0;
+        return ((now - mgr->ctx.last_tx_ms) >= (uint64_t)mgr->cfg.ping_interval_ms) ? 1 : 0;
 }
 
 /// @brief Send a ping to the UI client.
@@ -594,7 +715,7 @@ static int ping_send(ui_mgr_t *mgr, uint64_t now)
         if (!mgr) {
                 return -EINVAL;
         }
-        fd = ra_ui_uds_client_fd(mgr->srv);
+        fd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
         if (fd < 0) {
                 return -EINVAL;
         }
@@ -602,15 +723,13 @@ static int ping_send(ui_mgr_t *mgr, uint64_t now)
         rc = ui_proto_send_frame(fd, UI_FRAME_PING, 0, NULL, 0);
         if (rc == 0) {
                 touch_tx(mgr, now);
-                mgr->last_ping_ms = now + (uint64_t)mgr->cfg.ping_interval_ms;
-                mgr->await_pong = 1;
-                mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
+                mgr->proto.await_pong = 1;
+                mgr->proto.pong_deadline_ms = now + (uint64_t)pong_timeout_ms(mgr);
                 return 0;
         }
         if (rc == -EAGAIN || rc == -EWOULDBLOCK || rc == -EINTR) {
-                mgr->last_ping_ms = now + (uint64_t)UI_PING_RETRY_BACKOFF_MS;
-                mgr->await_pong = 1;
-                mgr->pong_deadline_ms = now + (uint64_t)UI_PONG_TIMEOUT_DEFAULT_MS;
+                mgr->proto.await_pong = 1;
+                mgr->proto.pong_deadline_ms = now + (uint64_t)pong_timeout_ms(mgr);
                 return 1; /* retry later */
         }
         return rc; /* other error */
@@ -639,10 +758,10 @@ static void handle_stale(ui_mgr_t *mgr, uint64_t now)
         if (!mgr) {
                 return;
         }
-        if (ra_ui_uds_client_fd(mgr->srv) < 0) {
+        if (ra_ui_uds_client_fd(mgr->ra_uds_srv) < 0) {
                 return;
         }
-        if (mgr->await_pong && mgr->pong_deadline_ms != 0 && now >= mgr->pong_deadline_ms) {
+        if (mgr->proto.await_pong && mgr->proto.pong_deadline_ms != 0 && now >= mgr->proto.pong_deadline_ms) {
                 drop_ui(mgr);
                 return;
         }
@@ -650,22 +769,42 @@ static void handle_stale(ui_mgr_t *mgr, uint64_t now)
                 drop_ui(mgr);
                 return;
         }
-        if (mgr->cfg.stale_timeout_ms <= 0) {
-                return;
-        }
-
-        if (is_stale(mgr, now)) {
+        if (mgr->cfg.stale_timeout_ms > 0 && is_stale(mgr, now)) {
                 drop_ui(mgr);
+                return;
         }
 }
 
-///===== external API =====///
+///===== public API =====///
 
 /// @brief Allocate UI manager.
 /// @return Allocated UI manager, or NULL on failure.
 ui_mgr_t *alloc_ui_mgr(void)
 {
-        return (ui_mgr_t*)calloc(1, sizeof(ui_mgr_t));
+        ui_mgr_t *mgr;
+        mgr = (ui_mgr_t *)calloc(1, sizeof(ui_mgr_t));
+        if (!mgr) {
+                return NULL;
+        }
+
+        mgr->fsm = alloc_fsm();
+        mgr->dispatch = alloc_dispatch();
+        mgr->obs = alloc_obs();
+        mgr->proto.rx_buf = (ui_rx_buf_t *)calloc(1, sizeof(ui_rx_buf_t));
+
+        if (!mgr->fsm || !mgr->dispatch || !mgr->obs || !mgr->proto.rx_buf) {
+                if (mgr->proto.rx_buf) {
+                        free(mgr->proto.rx_buf);
+                        mgr->proto.rx_buf = NULL;
+                }
+                destroy_fsm(&mgr->fsm);
+                destroy_dispatch(&mgr->dispatch);
+                destroy_obs(&mgr->obs);
+                free(mgr);
+                return NULL;
+        }
+
+        return mgr;
 }
 
 /// @brief Destroy UI manager.
@@ -675,7 +814,18 @@ void destroy_ui_mgr(ui_mgr_t **mgr)
         if (!mgr || !*mgr) {
                 return;
         }
+
         deinit_ui_mgr(*mgr);
+
+        if ((*mgr)->proto.rx_buf) {
+                free((*mgr)->proto.rx_buf);
+                (*mgr)->proto.rx_buf = NULL;
+        }
+
+        destroy_fsm(&(*mgr)->fsm);
+        destroy_dispatch(&(*mgr)->dispatch);
+        destroy_obs(&(*mgr)->obs);
+
         free(*mgr);
         *mgr = NULL;
 }
@@ -688,20 +838,31 @@ void destroy_ui_mgr(ui_mgr_t **mgr)
 /// @return 0 on success, negative error code on failure.
 int init_ui_mgr(ui_mgr_t *mgr, const ui_mgr_cfg_t *cfg, const ui_mgr_cb_t *cb)
 {
+        int rc;
+
         if (!mgr || !cfg) {
                 return -EINVAL;
         }
+
         if (cfg->sock_path[0] == '\0') {
                 return -EINVAL;
         }
 
-        memset(mgr, 0, sizeof(ui_mgr_t));
+        memset(&mgr->ctx, 0, sizeof(mgr->ctx));
+        mgr->proto.await_pong = 0;
+        mgr->proto.pong_deadline_ms = 0ULL;
+        mgr->proto.hello_last_seen_wseq = 0ULL;
+
+        if (mgr->proto.rx_buf) {
+                ui_rx_buf_init(mgr->proto.rx_buf);
+        }
+
         mgr->cfg = *cfg;
 
         if (cb) {
-                mgr->cb = *cb;
+                mgr->notify_cb = *cb;
         } else {
-                memset(&mgr->cb, 0, sizeof(mgr->cb));
+                memset(&mgr->notify_cb, 0, sizeof(mgr->notify_cb));
         }
 
         if (mgr->cfg.backlog <= 0) {
@@ -718,17 +879,34 @@ int init_ui_mgr(ui_mgr_t *mgr, const ui_mgr_cfg_t *cfg, const ui_mgr_cb_t *cb)
                         mgr->cfg.allow_gid = -1;
                 }
         }
-        mgr->srv = ra_ui_uds_srv_alloc();
-        if (!mgr->srv) {
+
+        mgr->ra_uds_srv = ra_ui_uds_srv_alloc();
+        if (!mgr->ra_uds_srv) {
                 return -ENOMEM;
         }
-        int rc = ra_ui_uds_srv_init(mgr->srv, mgr->cfg.sock_path, mgr->cfg.backlog, mgr->cfg.chmod_mode, mgr->cfg.nonblock);
-        if (rc) {
-                ra_ui_uds_srv_destroy(&mgr->srv);
+
+        rc = ra_ui_uds_srv_init(mgr->ra_uds_srv,
+                                mgr->cfg.sock_path,
+                                mgr->cfg.backlog,
+                                mgr->cfg.chmod_mode,
+                                mgr->cfg.nonblock);
+        if (rc != 0) {
+                ra_ui_uds_srv_destroy(&mgr->ra_uds_srv);
                 return rc;
         }
-        ui_rx_buf_init(&mgr->rx_buf);
-        mgr->state = UI_ST_INIT;
+
+        if (mgr->proto.rx_buf) {
+                ui_rx_buf_init(mgr->proto.rx_buf);
+        }
+
+        rc = ui_mgr_build_fsm_spec(mgr);
+        if (rc != 0) {
+                ra_ui_uds_srv_deinit(mgr->ra_uds_srv);
+                ra_ui_uds_srv_destroy(&mgr->ra_uds_srv);
+                return rc;
+        }
+
+        ui_set_state(mgr, UI_ST_INIT);
         return 0;
 }
 
@@ -739,9 +917,26 @@ void deinit_ui_mgr(ui_mgr_t *mgr)
         if (!mgr) {
                 return;
         }
+
         stop_ui_mgr(mgr);
-        ra_ui_uds_srv_destroy(&mgr->srv);
-        memset(mgr, 0, sizeof(*mgr));
+
+        if (mgr->ra_uds_srv) {
+                ra_ui_uds_srv_deinit(mgr->ra_uds_srv);
+                ra_ui_uds_srv_destroy(&mgr->ra_uds_srv);
+        }
+
+        memset(&mgr->ctx, 0, sizeof(mgr->ctx));
+        mgr->proto.await_pong = 0;
+        mgr->proto.pong_deadline_ms = 0ULL;
+        mgr->proto.hello_last_seen_wseq = 0ULL;
+        if (mgr->proto.rx_buf) {
+                ui_rx_buf_init(mgr->proto.rx_buf);
+        }
+
+        memset(&mgr->notify_cb, 0, sizeof(mgr->notify_cb));
+        memset(&mgr->cfg, 0, sizeof(mgr->cfg));
+
+        ui_set_state(mgr, UI_ST_SHUTDOWN);
 }
 
 /// @brief Start UI manager (begin listening for connections).
@@ -749,14 +944,16 @@ void deinit_ui_mgr(ui_mgr_t *mgr)
 /// @return 0 on success, negative error code on failure.
 int start_ui_mgr(ui_mgr_t *mgr)
 {
-        if (!mgr) {
+        int rc;
+
+        if (!mgr || !mgr->ra_uds_srv) {
                 return -EINVAL;
         }
-        int rc = ra_ui_uds_srv_open(mgr->srv);
-        if (rc) {
+        rc = ra_ui_uds_srv_open(mgr->ra_uds_srv);
+        if (rc != 0) {
                 return rc;
         }
-        mgr->state = UI_ST_IDLE;
+        (void)fsm_step(mgr->fsm, mgr, UI_MGR_EV_START);
         return 0;
 }
 
@@ -768,8 +965,10 @@ void stop_ui_mgr(ui_mgr_t *mgr)
                 return;
         }
         drop_ui(mgr);
-        ra_ui_uds_srv_close(mgr->srv);
-        mgr->state = UI_ST_SHUTDOWN;
+        if (mgr->ra_uds_srv) {
+                ra_ui_uds_srv_close(mgr->ra_uds_srv);
+        }
+        (void)fsm_step(mgr->fsm, mgr, UI_MGR_EV_SHUTDOWN);
 }
 
 /// @brief Get current state of UI manager.
@@ -777,7 +976,7 @@ void stop_ui_mgr(ui_mgr_t *mgr)
 /// @return Current state of UI manager.
 ui_mgr_state_t get_ui_mgr_state(const ui_mgr_t *mgr)
 {
-        return mgr ? mgr->state : UI_ST_SHUTDOWN;
+        return ui_state(mgr);
 }
 
 /// @brief Poll UI manager once (non-blocking).
@@ -786,18 +985,24 @@ ui_mgr_state_t get_ui_mgr_state(const ui_mgr_t *mgr)
 /// @return 0 on success, negative error code on failure.
 int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
 {
-        if (!mgr || (mgr->state == UI_ST_SHUTDOWN)) {
-                return -EINVAL;
-        }
-        uint64_t now = now_ms();
-        int lfd = ra_ui_uds_listen_fd(mgr->srv);
-        int cfd = ra_ui_uds_client_fd(mgr->srv);
-
+        uint64_t now;
+        int lfd;
+        int cfd;
         struct pollfd pfds[2];
         int nfds = 0;
-
         int idx_lfd = -1;
         int idx_cfd = -1;
+        int pr;
+        short cfd_revents = 0;
+
+        if (!mgr || ui_state(mgr) == UI_ST_SHUTDOWN || !mgr->ra_uds_srv) {
+                return -EINVAL;
+        }
+
+        now = now_ms();
+
+        lfd = ra_ui_uds_listen_fd(mgr->ra_uds_srv);
+        cfd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
 
         if (lfd >= 0) {
                 idx_lfd = nfds;
@@ -806,6 +1011,7 @@ int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
                 pfds[nfds].revents = 0;
                 nfds++;
         }
+
         if (cfd >= 0) {
                 idx_cfd = nfds;
                 pfds[nfds].fd = cfd;
@@ -816,33 +1022,46 @@ int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
 
         timeout_ms = clamp_poll_timeout(mgr, timeout_ms, now);
 
-        int pr = poll(pfds, nfds, timeout_ms);
+        pr = poll(pfds, nfds, timeout_ms);
         if (pr < 0) {
                 if (errno == EINTR) {
                         return 0;
                 }
                 return -errno;
         }
+
         if (pr > 0) {
-                // Handle accept event
-                if (idx_lfd >= 0 && (pfds[idx_lfd].revents & POLLIN)) {
-                        // printf("UI mgr: new connection incoming\n");
-                        handle_accept(mgr, now);
+                if (idx_cfd >= 0) {
+                        cfd_revents = pfds[idx_cfd].revents;
                 }
-                // Handle UI RX event
-                cfd = ra_ui_uds_client_fd(mgr->srv);
-                if (cfd >= 0 && idx_cfd >= 0 && pfds[idx_cfd].fd == cfd) {
-                        if (pfds[idx_cfd].revents & (POLLHUP | POLLERR)) {
+
+                if (idx_lfd >= 0 && (pfds[idx_lfd].revents & POLLIN)) {
+                        handle_accept(mgr, now);
+
+                        cfd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
+                        if (cfd >= 0 && ui_state(mgr) == UI_ST_HANDSHAKE) {
+                                int hr = ui_rx_handshake(mgr, now);
+                                if (hr == 0) {
+                                        finish_attach(mgr, cfd, now);
+                                } else if (hr < 0 && hr != 1) {
+                                        drop_ui(mgr);
+                                }
+                        }
+                }
+
+                cfd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
+                if (cfd >= 0) {
+                        if (cfd_revents & (POLLHUP | POLLERR)) {
                                 drop_ui(mgr);
-                        } else if (pfds[idx_cfd].revents & POLLIN) {
-                                if (mgr->state == UI_ST_HANDSHAKE) {
+                        } else if (cfd_revents & POLLIN) {
+                                if (ui_state(mgr) == UI_ST_HANDSHAKE) {
                                         int hr = ui_rx_handshake(mgr, now);
                                         if (hr == 0) {
                                                 finish_attach(mgr, cfd, now);
-                                        } else if (hr < 0) {
+                                        } else if (hr < 0 && hr != 1) {
                                                 drop_ui(mgr);
                                         }
-                                } else if (mgr->state == UI_ST_CONNECTED) {
+                                } else if (ui_state(mgr) == UI_ST_CONNECTED) {
                                         handle_ui_rx(mgr, now);
                                 }
                         }
@@ -852,6 +1071,7 @@ int ui_mgr_poll_once(ui_mgr_t *mgr, int timeout_ms)
         now = now_ms();
         maybe_ping(mgr, now);
         handle_stale(mgr, now);
+
         return 0;
 }
 
@@ -867,13 +1087,14 @@ int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq)
         ui_notify_snapshot_payload_t payload;
 
         if (!mgr) {
-                return -EINVAL;
+            return -EINVAL;
         }
-        if (mgr->state != UI_ST_CONNECTED) {
+
+        if (ui_state(mgr) != UI_ST_CONNECTED) {
                 return -ENOTCONN;
         }
 
-        fd = ra_ui_uds_client_fd(mgr->srv);
+        fd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
         if (fd < 0) {
                 return -ENOTCONN;
         }
@@ -882,7 +1103,11 @@ int ui_mgr_notify_snapshot_ready(ui_mgr_t *mgr, uint16_t kind, uint32_t seq)
         payload.kind = kind;
         payload.seq = seq;
 
-        rc = ui_proto_send_frame(fd, UI_FRAME_NOTIFY_SNAPSHOT, 0, &payload, sizeof(payload));
+        rc = ui_proto_send_frame(fd,
+                                 UI_FRAME_NOTIFY_SNAPSHOT,
+                                 0U,
+                                 &payload,
+                                 (uint32_t)sizeof(payload));
         if (rc != 0) {
                 return rc;
         }
@@ -908,11 +1133,11 @@ int ui_mgr_send_log_chunk(ui_mgr_t *mgr, uint32_t seq, uint16_t level, const cha
                 return -EINVAL;
         }
 
-        if (mgr->state != UI_ST_CONNECTED) {
+        if (ui_state(mgr) != UI_ST_CONNECTED) {
                 return -ENOTCONN;
         }
 
-        fd = ra_ui_uds_client_fd(mgr->srv);
+        fd = ra_ui_uds_client_fd(mgr->ra_uds_srv);
         if (fd < 0) {
                 return -ENOTCONN;
         }
@@ -923,7 +1148,7 @@ int ui_mgr_send_log_chunk(ui_mgr_t *mgr, uint32_t seq, uint16_t level, const cha
 
         text_len = strlen(text);
         if (text_len >= UI_LOG_TEXT_MAX) {
-                text_len = UI_LOG_TEXT_MAX - 1;
+                text_len = UI_LOG_TEXT_MAX - 1U;
         }
 
         payload.text_len = (uint16_t)text_len;
@@ -932,9 +1157,9 @@ int ui_mgr_send_log_chunk(ui_mgr_t *mgr, uint32_t seq, uint16_t level, const cha
 
         rc = ui_proto_send_frame(fd,
                                  UI_FRAME_LOG_CHUNK,
-                                 0,
+                                 0U,
                                  &payload,
-                                 sizeof(payload));
+                                 (uint32_t)sizeof(payload));
         if (rc != 0) {
                 return rc;
         }

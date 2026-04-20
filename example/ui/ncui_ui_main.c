@@ -1,25 +1,3 @@
-/*
- * example/ui/ncui_ui_main.c
- *
- * 목적:
- *   - skeleton 프로세스에 SIGUSR1 전송하여 UI manager 시작 요청
- *   - 기존 UI log UDS 경로 유지
- *   - hello("ULOG" + last_seen_wseq LE64) 전송
- *   - 서버 ping('P')에 pong('K') 응답
- *   - snapshot은 SHM에서 읽고, UDS notify로 갱신 트리거만 받음
- *   - ncurses 로 log/raw 상태 + snapshot 상태 표시
- *
- * 실행 예:
- *   1) skeleton 실행
- *   2) ex_ncui_ui <skeleton_pid>
- *
- * 키:
- *   q : 종료
- *   r : reconnect
- *   h : hello 재전송
- *   s : SIGUSR1 재전송
- */
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -54,6 +32,8 @@
 
 #define UI_DEFAULT_POLL_TIMEOUT_MS  100
 #define UI_RECONNECT_DELAY_MS       1000
+#define UI_HELLO_RETRY_MS           500
+#define UI_START_WAIT_MS            200
 
 #define UI_SNAPSHOT_MAGIC           0x55495348u
 #define UI_SNAPSHOT_VERSION         1u
@@ -131,6 +111,10 @@ typedef struct app_ctx_s {
 
         int last_errno;
         int last_signal_rc;
+
+        int hello_done;
+        int hello_tx_count;
+        uint64_t last_hello_tx_ms;
 
         uint32_t last_snapshot_seq;
         uint64_t last_seen_wseq;
@@ -210,7 +194,7 @@ static void close_snapshot_reader(app_ctx_t *ctx)
         memset(&ctx->snap_shm, 0, sizeof(ctx->snap_shm));
         ctx->snap_shm.fd = -1;
         ctx->snap_shm_opened = 0;
-    }
+}
 
 static int open_snapshot_reader(app_ctx_t *ctx)
 {
@@ -228,7 +212,15 @@ static int open_snapshot_reader(app_ctx_t *ctx)
         memset(shm, 0, sizeof(*shm));
         shm->fd = -1;
         shm->size = sizeof(ui_snapshot_shm_layout_t);
-        strncpy(shm->name, ctx->shm_name, sizeof(shm->name) - 1);
+
+        if (strlen(ctx->shm_name) >= sizeof(shm->name)) {
+                ctx->last_errno = ENAMETOOLONG;
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "snapshot shm name too long");
+                return -1;
+        }
+
+        snprintf(shm->name, sizeof(shm->name), "%s", ctx->shm_name);
 
         shm->fd = shm_open(shm->name, O_RDWR, 0660);
         if (shm->fd < 0) {
@@ -311,6 +303,7 @@ static void close_conn(app_ctx_t *ctx)
         }
 
         ctx->connected = 0;
+        ctx->hello_done = 0;
 }
 
 static int trigger_ui_mgr_start(app_ctx_t *ctx)
@@ -352,6 +345,8 @@ static int connect_server(app_ctx_t *ctx)
                 return -1;
         }
 
+        ctx->connect_try_count++;
+
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0) {
                 ctx->last_errno = errno;
@@ -362,12 +357,34 @@ static int connect_server(app_ctx_t *ctx)
 
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, ctx->sock_path, sizeof(addr.sun_path) - 1);
+
+        if (strlen(ctx->sock_path) >= sizeof(addr.sun_path)) {
+                ctx->last_errno = ENAMETOOLONG;
+                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                         "socket path too long");
+                close(fd);
+                return -1;
+        }
+
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ctx->sock_path);
 
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
                 ctx->last_errno = errno;
-                snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "connect fail: errno=%d", errno);
+
+                if (errno == ENOENT) {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "connect fail: socket not created yet");
+                } else if (errno == ECONNREFUSED) {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "connect fail: connection refused");
+                } else if (errno == EACCES) {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "connect fail: permission denied");
+                } else {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "connect fail: errno=%d", errno);
+                }
+
                 close(fd);
                 return -1;
         }
@@ -382,7 +399,9 @@ static int connect_server(app_ctx_t *ctx)
 
         ctx->fd = fd;
         ctx->connected = 1;
-        ctx->connect_try_count++;
+        ctx->hello_done = 0;
+        ctx->hello_tx_count = 0;
+        ctx->last_hello_tx_ms = 0ULL;
 
         snprintf(ctx->last_event, sizeof(ctx->last_event),
                  "connected to ui socket");
@@ -413,11 +432,14 @@ static int send_hello(app_ctx_t *ctx)
                 return -1;
         }
 
+        ctx->hello_tx_count++;
+        ctx->last_hello_tx_ms = now_ms();
         ctx->tx_count += (int)(sizeof(ui_frame_hdr_t) + sizeof(payload));
-        ctx->last_tx_ms = now_ms();
+        ctx->last_tx_ms = ctx->last_hello_tx_ms;
 
         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                 "hello sent (wseq=%llu)",
+                 "hello sent (count=%d wseq=%llu)",
+                 ctx->hello_tx_count,
                  (unsigned long long)ctx->last_seen_wseq);
         return 0;
 }
@@ -448,7 +470,11 @@ static int send_pong(app_ctx_t *ctx)
 /* ============================================================
  * rx processing
  * ============================================================ */
-static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const unsigned char *payload, size_t payload_len)
+
+static void handle_ui_frame(app_ctx_t *ctx,
+                            const ui_frame_hdr_t *hdr,
+                            const unsigned char *payload,
+                            size_t payload_len)
 {
         if (!ctx || !hdr) {
                 return;
@@ -456,6 +482,7 @@ static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const uns
 
         switch (hdr->type) {
         case UI_FRAME_PING:
+                ctx->hello_done = 1;
                 ctx->ping_rx_count++;
                 if (send_pong(ctx) != 0) {
                         close_conn(ctx);
@@ -473,6 +500,7 @@ static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const uns
                         return;
                 }
 
+                ctx->hello_done = 1;
                 ctx->notify_rx_count++;
                 (void)update_snapshot_from_shm(ctx);
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
@@ -480,10 +508,11 @@ static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const uns
                 break;
 
         case UI_FRAME_HELLO_ACK:
+                ctx->hello_done = 1;
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
                          "hello ack received");
                 break;
-        
+
         case UI_FRAME_LOG_CHUNK:
                 if (payload_len == sizeof(ui_log_chunk_payload_t)) {
                         const ui_log_chunk_payload_t *logp =
@@ -496,18 +525,19 @@ static void handle_ui_frame(app_ctx_t *ctx, const ui_frame_hdr_t *hdr, const uns
 
                         memcpy(ctx->last_log_line, logp->text, copy_len);
                         ctx->last_log_line[copy_len] = '\0';
+                        ctx->hello_done = 1;
                         ctx->log_rx_count++;
 
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                "log chunk received");
+                                 "log chunk received");
                 } else {
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                "log chunk payload size mismatch");
+                                 "log chunk payload size mismatch");
                         close_conn(ctx);
                         return;
                 }
                 break;
-                    
+
         default:
                 snprintf(ctx->last_event, sizeof(ctx->last_event),
                          "unknown frame type=%u len=%u",
@@ -532,59 +562,60 @@ static void process_rx(app_ctx_t *ctx)
                 return;
         }
 
-        n = recv(ctx->fd, tmp, sizeof(tmp), MSG_DONTWAIT);
-        if (n == 0) {
-                snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "server closed connection");
-                close_conn(ctx);
-                return;
-        }
-
-        if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                        return;
-                }
-
-                ctx->last_errno = errno;
-                snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "recv fail errno=%d", errno);
-                close_conn(ctx);
-                return;
-        }
-
-        ctx->rx_count += (int)n;
-        ctx->last_rx_ms = now_ms();
-
-        rc = ui_proto_append_rx(&ctx->rx_buf, tmp, (size_t)n);
-        if (rc != 0) {
-                snprintf(ctx->last_event, sizeof(ctx->last_event),
-                         "rx buffer overflow rc=%d", rc);
-                close_conn(ctx);
-                return;
-        }
-
-        for (;;) {
-                rc = ui_proto_try_parse(&ctx->rx_buf,
-                                        &hdr,
-                                        payload,
-                                        sizeof(payload),
-                                        &payload_len);
-                if (rc == 1) {
-                        /* 아직 frame 전체가 안 들어옴 */
-                        break;
-                }
-
-                if (rc != 0) {
+        while (1) {
+                n = recv(ctx->fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+                if (n == 0) {
                         snprintf(ctx->last_event, sizeof(ctx->last_event),
-                                 "frame parse fail rc=%d", rc);
+                                 "server closed connection");
                         close_conn(ctx);
                         return;
                 }
 
-                handle_ui_frame(ctx, &hdr, payload, payload_len);
+                if (n < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                                return;
+                        }
 
-                if (!ctx->connected) {
+                        ctx->last_errno = errno;
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "recv fail errno=%d", errno);
+                        close_conn(ctx);
                         return;
+                }
+
+                ctx->rx_count += (int)n;
+                ctx->last_rx_ms = now_ms();
+
+                rc = ui_proto_append_rx(&ctx->rx_buf, tmp, (size_t)n);
+                if (rc != 0) {
+                        snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                 "rx buffer overflow rc=%d", rc);
+                        close_conn(ctx);
+                        return;
+                }
+
+                for (;;) {
+                        rc = ui_proto_try_parse(&ctx->rx_buf,
+                                                &hdr,
+                                                payload,
+                                                sizeof(payload),
+                                                &payload_len);
+                        if (rc == 1) {
+                                break; /* need more data */
+                        }
+
+                        if (rc != 0) {
+                                snprintf(ctx->last_event, sizeof(ctx->last_event),
+                                         "frame parse fail rc=%d", rc);
+                                close_conn(ctx);
+                                return;
+                        }
+
+                        handle_ui_frame(ctx, &hdr, payload, payload_len);
+
+                        if (!ctx->connected) {
+                                return;
+                        }
                 }
         }
 }
@@ -607,6 +638,8 @@ static void draw_ui(const app_ctx_t *ctx)
         mvprintw(row++, 2, "socket path     : %s", ctx->sock_path);
         mvprintw(row++, 2, "snapshot shm    : %s", ctx->shm_name);
         mvprintw(row++, 2, "connected       : %s", ctx->connected ? "YES" : "NO");
+        mvprintw(row++, 2, "hello done      : %s", ctx->hello_done ? "YES" : "NO");
+        mvprintw(row++, 2, "hello tx count  : %d", ctx->hello_tx_count);
         mvprintw(row++, 2, "fd              : %d", ctx->fd);
         mvprintw(row++, 2, "signal tries    : %d", ctx->signal_try_count);
         mvprintw(row++, 2, "connect tries   : %d", ctx->connect_try_count);
@@ -744,6 +777,7 @@ int main(int argc, char *argv[])
         curs_set(0);
 
         (void)trigger_ui_mgr_start(&ctx);
+        napms(UI_START_WAIT_MS);
         (void)open_snapshot_reader(&ctx);
         (void)update_snapshot_from_shm(&ctx);
 
@@ -754,6 +788,8 @@ int main(int argc, char *argv[])
         }
 
         while (g_run) {
+                uint64_t now = now_ms();
+
                 ch = getch();
                 if (ch != ERR) {
                         handle_key(&ctx, ch);
@@ -773,6 +809,17 @@ int main(int argc, char *argv[])
                                 }
                         }
                         continue;
+                }
+
+                if (!ctx.hello_done) {
+                        if (ctx.last_hello_tx_ms == 0ULL ||
+                            (now - ctx.last_hello_tx_ms) >= UI_HELLO_RETRY_MS) {
+                                if (send_hello(&ctx) != 0) {
+                                        close_conn(&ctx);
+                                        draw_ui(&ctx);
+                                        continue;
+                                }
+                        }
                 }
 
                 pfd.fd = ctx.fd;

@@ -1,5 +1,5 @@
-#ifndef __UI_MGR_H__
-#define __UI_MGR_H__
+#ifndef __MGR_UI_UI_MGR_H__
+#define __MGR_UI_UI_MGR_H__
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,7 +24,8 @@ typedef enum {
         UI_ST_IDLE = 1,
         UI_ST_HANDSHAKE = 2,
         UI_ST_CONNECTED = 3,
-        UI_ST_SHUTDOWN = 4
+        UI_ST_SHUTDOWN = 4,
+        UI_ST_ERR = 5
 } ui_mgr_state_t;
 
 /// @brief UI manager configuration structure.
@@ -43,6 +44,7 @@ struct ui_mgr_cfg_s {
         int rx_byte_budget; ///< Max RX byte budget per poll (0: unlimited)
 
         int ping_interval_ms; ///< Server ping interval in milliseconds (0: disable)
+        int pong_timeout_ms; ///< PONG timeout in milliseconds (0: disable)
         
         int enable_peer_cred_check; ///<SO_PEERCRED check option.
         int allow_uid;              ///< Allowed UID for UI connection (-1: disable)
@@ -85,4 +87,4 @@ extern int ui_mgr_start_runloop(ui_mgr_t *mgr);
 extern int ui_mgr_request_start(ui_mgr_t *mgr);
 extern int ui_mgr_stop_runloop(ui_mgr_t *mgr);
 
-#endif /* __UI_MGR_H__ */
+#endif /* __MGR_UI_UI_MGR_H__ */

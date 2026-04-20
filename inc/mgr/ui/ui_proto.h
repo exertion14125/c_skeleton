@@ -1,5 +1,5 @@
-#ifndef __UI_PROTO_H__
-#define __UI_PROTO_H__
+#ifndef __MGR_UI_PROTO_H__
+#define __MGR_UI_PROTO_H__
 
 #include <stddef.h>
 #include <stdint.h>
@@ -7,9 +7,9 @@
 #define UI_FRAME_MAGIC   0x55494D47u   ///< 'UIMG'
 #define UI_PROTO_VERSION 1u
 
-#define UI_RX_BUF_CAP    4096 ///< RX buffer capacity
-#define UI_FRAME_PAYLOAD_MAX   1024  ///< Maximum frame payload length
-#define UI_LOG_TEXT_MAX  256   ///< Maximum log text length
+#define UI_RX_BUF_CAP           4096    ///< RX buffer capacity
+#define UI_FRAME_PAYLOAD_MAX    1024    ///< Maximum frame payload length
+#define UI_LOG_TEXT_MAX         256     ///< Maximum log text length
 
 /// @brief UI frame types enumeration.
 typedef enum ui_frame_type_e {
@@ -62,9 +62,12 @@ typedef struct ui_rx_buf_s {
         size_t used;                      ///< Used bytes in the buffer
 } ui_rx_buf_t;
 
+extern int  ui_proto_validate_hdr(const ui_frame_hdr_t *hdr);
+extern int  ui_proto_is_valid_type(uint16_t type);
+
 extern void ui_rx_buf_init(ui_rx_buf_t *rb);
 extern int  ui_proto_append_rx(ui_rx_buf_t *rb, const void *data, size_t len);
 extern int  ui_proto_try_parse(ui_rx_buf_t *rb, ui_frame_hdr_t *out_hdr, unsigned char *out_payload, size_t payload_cap, size_t *out_payload_len);
 extern int  ui_proto_send_frame(int fd, uint16_t type, uint32_t flags, const void *payload, uint32_t payload_len);
 
-#endif /* __UI_PROTO_H__ */
+#endif /* __MGR_UI_PROTO_H__ */
