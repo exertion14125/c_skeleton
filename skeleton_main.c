@@ -10,6 +10,10 @@
 
 #include "util/log/log_bootstrap.h"
 
+#include "mgr/cfg/cfg_mgr.h"
+#include "mgr/gio/gio_mgr.h"
+#include "mgr/red/red_mgr.h"
+#include "mgr/sys/sys_mgr.h"
 #include "mgr/ui/ui_mgr_bootstrap.h"
 #include "mgr/ui/ui_snapshot_mgr.h"
 #include "ui/ui_snapshot_shm.h"
@@ -18,6 +22,10 @@
 
 static ui_snapshot_mgr_t* ui_snapshot_mgr = NULL;
 static ui_mgr_t* ui_mgr = NULL;
+static cfg_mgr_t* cfg_mgr = NULL;
+static gio_mgr_t* gio_mgr = NULL;
+static red_mgr_t* red_mgr = NULL;
+static sys_mgr_t* sys_mgr = NULL;
 static volatile bool g_ui_log_init = 0;
 static volatile bool g_init = 0;
 static volatile bool g_run = 0;
@@ -167,6 +175,8 @@ mgr_bus_t *create_sample_mgr_bus(void)
 /// @param argv argumnet value.
 int main(int argc, char *argv[]) 
 {
+        mgr_bus_t *mgr_bus = NULL;
+
         (void)argc;
         (void)argv;
         printf("\033[2J\033[H"); // Clear screen and move cursor to home position.
@@ -183,21 +193,66 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Failed to bootstrap log system.\n");
                 return -1;
         }
+
+        //===== Create manager bus first.
+        mgr_bus = create_sample_mgr_bus();
+        if (mgr_bus == NULL) {
+                LOGE_T("MAIN", "Failed to create sample manager bus.\n");
+                goto skeleton_exit;
+        }
+
+        //===== Bootstrap domain managers.
+        cfg_mgr = bootstrap_cfg_mgr();
+        if (!cfg_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap CFG manager.\n");
+                goto skeleton_exit;
+        }
+
+        gio_mgr = bootstrap_gio_mgr();
+        if (!gio_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap GIO manager.\n");
+                goto skeleton_exit;
+        }
+
+        red_mgr = bootstrap_red_mgr();
+        if (!red_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap RED manager.\n");
+                goto skeleton_exit;
+        }
+
         //==== ui log init
         ui_mgr = bootstrap_ui_mgr();
         if (ui_mgr == NULL) {
                 LOGE_T("MAIN", "Failed to bootstrap UI manager.\n");
+                goto skeleton_exit;
         } else {
                 g_ui_log_init = true;
         }
-        if (ui_mgr) {
-                if (ui_mgr_start_runloop(ui_mgr) != 0) {
-                        LOGE_T("MAIN", "Failed to start ui_mgr runloop.\n");
-                        destroy_ui_mgr(&ui_mgr);
-                        ui_mgr = NULL;
-                        goto skeleton_exit;
-                }
+
+        sys_mgr = bootstrap_sys_mgr();
+        if (!sys_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap SYS manager.\n");
+                goto skeleton_exit;
         }
+
+        //===== Bind bus to managers.
+        if (cfg_mgr_bind_bus(cfg_mgr, mgr_bus) != 0) {
+                LOGE_T("MAIN", "Failed to bind CFG manager bus.\n");
+                goto skeleton_exit;
+        }
+        if (gio_mgr_bind_bus(gio_mgr, mgr_bus) != 0) {
+                LOGE_T("MAIN", "Failed to bind GIO manager bus.\n");
+                goto skeleton_exit;
+        }
+        if (red_mgr_bind_bus(red_mgr, mgr_bus) != 0) {
+                LOGE_T("MAIN", "Failed to bind RED manager bus.\n");
+                goto skeleton_exit;
+        }
+        if (sys_mgr_bind_bus(sys_mgr, mgr_bus) != 0) {
+                LOGE_T("MAIN", "Failed to bind SYS manager bus.\n");
+                goto skeleton_exit;
+        }
+
         //==== Initialize UI snapshot manager.
         ui_snapshot_mgr = alloc_ui_snapshot_mgr();
         if (ui_snapshot_mgr == NULL) {
@@ -209,20 +264,57 @@ int main(int argc, char *argv[])
                 destroy_ui_snapshot_mgr(&ui_snapshot_mgr);
                 goto skeleton_exit;
         }
-        //===== Initialize skeleton process.
-        //=== Manager process bootstrap sample. If your process has no manager process, you can skip this part.
 
-        mgr_bus_t *mgr_bus = create_sample_mgr_bus();
-        if (mgr_bus == NULL) {
-                LOGE_T("MAIN", "Failed to create sample manager bus.\n");
+        //===== Start runloops: CFG -> GIO -> RED -> UI -> SYS
+        if (cfg_mgr_start_runloop(cfg_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start CFG manager runloop.\n");
+                goto skeleton_exit;
+        }
+        if (gio_mgr_start_runloop(gio_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start GIO manager runloop.\n");
+                goto skeleton_exit;
+        }
+        if (red_mgr_start_runloop(red_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start RED manager runloop.\n");
+                goto skeleton_exit;
+        }
+        if (ui_mgr_start_runloop(ui_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start UI manager runloop.\n");
+                goto skeleton_exit;
+        }
+        if (sys_mgr_start_runloop(sys_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start SYS manager runloop.\n");
                 goto skeleton_exit;
         }
 
-        // skeleton_proc_t* skeleton_proc = bootstrap_skeleton_proc();
-        // if (skeleton_proc == NULL) {
-        //         LOGE_T("SKELETON", "Failed to bootstrap SKELETON process.\n");
-        //         goto skeleton_exit;
-        // }
+        //===== Request start: CFG -> GIO -> RED -> UI -> SYS
+        if (cfg_mgr_request_start(cfg_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request CFG manager start.\n");
+                goto skeleton_exit;
+        }
+        if (gio_mgr_request_start(gio_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request GIO manager start.\n");
+                goto skeleton_exit;
+        }
+        if (red_mgr_request_start(red_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request RED manager start.\n");
+                goto skeleton_exit;
+        }
+        if (ui_mgr_request_start(ui_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request UI manager start.\n");
+                goto skeleton_exit;
+        }
+        if (sys_mgr_request_start(sys_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request SYS manager start.\n");
+                goto skeleton_exit;
+        }
+
+        //===== Optional initial orchestration commands.
+        (void)sys_mgr_send_cfg_open(sys_mgr, 1U);
+        (void)sys_mgr_send_cfg_adjust(sys_mgr, 2U, 42);
+        (void)sys_mgr_send_gio_exec(sys_mgr, 3U, 7);
+        (void)sys_mgr_send_red_eval(sys_mgr, 4U);
+
         g_init = true;
 
         // Signal register.
@@ -238,14 +330,51 @@ int main(int argc, char *argv[])
                 usleep(100 * 1000);
         }
 skeleton_exit:
+        if (mgr_bus) {
+                mgr_bus_wakeup(mgr_bus);
+        }
+        if (sys_mgr) {
+                (void)sys_mgr_stop_runloop(sys_mgr);
+        }
+        if (ui_mgr) {
+                (void)ui_mgr_stop_runloop(ui_mgr);
+        }
+        if (red_mgr) {
+                (void)red_mgr_stop_runloop(red_mgr);
+        }
+        if (gio_mgr) {
+                (void)gio_mgr_stop_runloop(gio_mgr);
+        }
+        if (cfg_mgr) {
+                (void)cfg_mgr_stop_runloop(cfg_mgr);
+        }
+
         if (ui_snapshot_mgr) {
                 destroy_ui_snapshot_mgr(&ui_snapshot_mgr);
                 ui_snapshot_mgr = NULL;
         }
+        if (sys_mgr) {
+                destroy_sys_mgr(&sys_mgr);
+                sys_mgr = NULL;
+        }
         if (ui_mgr) {
-                (void)ui_mgr_stop_runloop(ui_mgr);
-                 destroy_ui_mgr(&ui_mgr);
-                 ui_mgr = NULL;
+                destroy_ui_mgr(&ui_mgr);
+                ui_mgr = NULL;
+        }
+        if (red_mgr) {
+                destroy_red_mgr(&red_mgr);
+                red_mgr = NULL;
+        }
+        if (gio_mgr) {
+                destroy_gio_mgr(&gio_mgr);
+                gio_mgr = NULL;
+        }
+        if (cfg_mgr) {
+                destroy_cfg_mgr(&cfg_mgr);
+                cfg_mgr = NULL;
+        }
+        if (mgr_bus) {
+                mgr_bus_destroy(&mgr_bus);
         }
         exit_log_system();
         printf("\n\r");
