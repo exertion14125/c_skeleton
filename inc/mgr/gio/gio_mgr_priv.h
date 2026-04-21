@@ -5,8 +5,8 @@
 #include <pthread.h>
 
 #include "mgr/gio/gio_mgr.h"
-#include "mgr/gio/gio_ipc_shm.h"
-#include "mgr/gio/gio_ipc_sem.h"
+#include "engine/gio/gio_engine.h"
+#include "ra/gio/gio_shm_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -16,11 +16,14 @@ typedef enum gio_mgr_event_e {
         GIO_MGR_EV_NONE = 0,
         GIO_MGR_EV_START = 1,
         GIO_MGR_EV_TICK = 2,
-        GIO_MGR_EV_TIMEOUT = 3,
-        GIO_MGR_EV_ERROR = 4,
-        GIO_MGR_EV_RECOVER = 5,
-        GIO_MGR_EV_STOP = 6,
-        GIO_MGR_EV_SHUTDOWN = 7
+        GIO_MGR_EV_REQ_POSTED = 3,
+        GIO_MGR_EV_RESP_OK = 4,
+        GIO_MGR_EV_RESP_TIMEOUT = 5,
+        GIO_MGR_EV_DEGRADED = 6,
+        GIO_MGR_EV_RECOVER = 7,
+        GIO_MGR_EV_STOP = 8,
+        GIO_MGR_EV_SHUTDOWN = 9,
+        GIO_MGR_EV_ERROR = 10
 } gio_mgr_event_t;
 
 struct gio_mgr_s {
@@ -47,10 +50,8 @@ struct gio_mgr_s {
         uint32_t dispatch_qcap;
         uint32_t obs_ring_cap;
 
-        gio_shm_t shm;
-        gio_sem_t sem;
-        uint32_t max_retry;
-        uint32_t timeout_ms;
+        gio_engine_t *engine;
+        gio_shm_ra_t *ra;
 };
 
 extern int gio_mgr_build_fsm(gio_mgr_t *m);

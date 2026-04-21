@@ -11,36 +11,46 @@ typedef enum app_mgr_msg_domain_e {
         APP_MGR_MSG_DOM_GIO  = 3,
         APP_MGR_MSG_DOM_RED  = 4,
         APP_MGR_MSG_DOM_UI   = 5,
-        APP_MGR_MSG_DOM_HEALTH = 6
+        APP_MGR_MSG_DOM_HEALTH = 6,
+        APP_MGR_MSG_DOM_LOGIC = 7
 } app_mgr_msg_domain_t;
 
 /// @brief Message code list for inter-manager requests/responses/events.
 typedef enum app_mgr_msg_code_e {
         APP_MGR_MSG_NONE = 0,
 
-        APP_MGR_MSG_SYS_CFG_OPEN_REQ      = 0x1101,
-        APP_MGR_MSG_SYS_CFG_ADJUST_REQ    = 0x1102,
-        APP_MGR_MSG_SYS_CFG_REOPEN_REQ    = 0x1103,
-        APP_MGR_MSG_SYS_CFG_MODIFY_REQ    = 0x1104,
+        APP_MGR_MSG_SYS_CFG_OPEN_REQ          = 0x1101,
+        APP_MGR_MSG_SYS_CFG_ADJUST_REQ        = 0x1102,
+        APP_MGR_MSG_SYS_CFG_REOPEN_REQ        = 0x1103,
+        APP_MGR_MSG_SYS_CFG_MODIFY_REQ        = 0x1104,
 
-        APP_MGR_MSG_SYS_GIO_EXEC_REQ      = 0x1201,
+        APP_MGR_MSG_SYS_GIO_EXEC_REQ          = 0x1201,
 
-        APP_MGR_MSG_SYS_RED_EVAL_REQ      = 0x1301,
+        APP_MGR_MSG_SYS_RED_EVAL_REQ          = 0x1301,
 
-        APP_MGR_MSG_CFG_OPEN_RSP          = 0x2101,
-        APP_MGR_MSG_CFG_ADJUST_RSP        = 0x2102,
-        APP_MGR_MSG_CFG_REOPEN_RSP        = 0x2103,
-        APP_MGR_MSG_CFG_MODIFY_RSP        = 0x2104,
+        APP_MGR_MSG_SYS_LOGIC_EXEC_REQ        = 0x1401,
 
-        APP_MGR_MSG_GIO_EXEC_RSP          = 0x2201,
-        APP_MGR_MSG_GIO_TIMEOUT_EVT       = 0x2202,
-        APP_MGR_MSG_GIO_DEGRADED_EVT      = 0x2203,
+        APP_MGR_MSG_CFG_OPEN_RSP              = 0x2101,
+        APP_MGR_MSG_CFG_ADJUST_RSP            = 0x2102,
+        APP_MGR_MSG_CFG_REOPEN_RSP            = 0x2103,
+        APP_MGR_MSG_CFG_MODIFY_RSP            = 0x2104,
 
-        APP_MGR_MSG_RED_DECISION_RSP      = 0x2301,
+        APP_MGR_MSG_GIO_EXEC_RSP              = 0x2201,
+        APP_MGR_MSG_GIO_TIMEOUT_EVT           = 0x2202,
+        APP_MGR_MSG_GIO_DEGRADED_EVT          = 0x2203,
+        APP_MGR_MSG_GIO_RX_DONE_EVT           = 0x2204,
+        APP_MGR_MSG_GIO_RED_INPUT_EVT         = 0x2205,
 
-        APP_MGR_MSG_UI_NOTIFY_EVT         = 0x2401,
+        APP_MGR_MSG_RED_DECISION_RSP          = 0x2301,
+        APP_MGR_MSG_RED_PROPOSE_FAILOVER_EVT  = 0x2302,
+        APP_MGR_MSG_RED_PROPOSE_RECOVER_EVT   = 0x2303,
+        APP_MGR_MSG_RED_PROPOSE_HOLD_EVT      = 0x2304,
 
-        APP_MGR_MSG_HEALTH_REPORT_EVT     = 0x3001
+        APP_MGR_MSG_UI_NOTIFY_EVT             = 0x2401,
+
+        APP_MGR_MSG_LOGIC_EXEC_RSP            = 0x2501,
+
+        APP_MGR_MSG_HEALTH_REPORT_EVT         = 0x3001
 } app_mgr_msg_code_t;
 
 /// @brief Optional message flag bits.

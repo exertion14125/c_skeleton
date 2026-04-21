@@ -8,11 +8,19 @@
 typedef struct gio_mgr_s gio_mgr_t;
 
 typedef enum gio_mgr_state_e {
+        GIO_ST_ERR = -1,
+
         GIO_ST_INIT = 0,
         GIO_ST_IDLE = 1,
-        GIO_ST_RUNNING = 2,
-        GIO_ST_SHUTDOWN = 3,
-        GIO_ST_ERR = 4
+
+        GIO_ST_CYCLE_WAIT = 10,
+        GIO_ST_REQ_POSTED = 11,
+        GIO_ST_WAIT_RESP = 12,
+        GIO_ST_RX_OK = 13,
+        GIO_ST_RX_TIMEOUT = 14,
+        GIO_ST_DEGRADED = 15,
+
+        GIO_ST_SHUTDOWN = 20
 } gio_mgr_state_t;
 
 typedef struct gio_mgr_cfg_s {

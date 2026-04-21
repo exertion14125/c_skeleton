@@ -309,11 +309,6 @@ int main(int argc, char *argv[])
                 goto skeleton_exit;
         }
 
-        //===== Optional initial orchestration commands.
-        (void)sys_mgr_send_cfg_open(sys_mgr, 1U);
-        (void)sys_mgr_send_cfg_adjust(sys_mgr, 2U, 42);
-        (void)sys_mgr_send_gio_exec(sys_mgr, 3U, 7);
-        (void)sys_mgr_send_red_eval(sys_mgr, 4U);
 
         g_init = true;
 

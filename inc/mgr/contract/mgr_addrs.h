@@ -12,7 +12,8 @@ enum {
         APP_MGR_ADDR_CFG = 2,
         APP_MGR_ADDR_GIO = 3,
         APP_MGR_ADDR_RED = 4,
-        APP_MGR_ADDR_UI  = 5,
+        APP_MGR_ADDR_LOGIC = 5,
+        APP_MGR_ADDR_UI  = 6,
 
         APP_MGR_ADDR_MAX
 };
@@ -28,6 +29,7 @@ static inline const char* app_mgr_addr_to_str(mgr_bus_addr_t addr)
         case APP_MGR_ADDR_CFG: return "cfg";
         case APP_MGR_ADDR_GIO: return "gio";
         case APP_MGR_ADDR_RED: return "red";
+        case APP_MGR_ADDR_LOGIC: return "logic";
         case APP_MGR_ADDR_UI:  return "ui";
         default:               return "unknown";
         }

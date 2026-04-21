@@ -8,15 +8,34 @@
 typedef struct sys_mgr_s sys_mgr_t;
 
 typedef enum sys_mgr_state_e {
+        SYS_ST_ERR = -1,
+
         SYS_ST_INIT = 0,
         SYS_ST_IDLE = 1,
-        SYS_ST_RUNNING = 2,
-        SYS_ST_SHUTDOWN = 3,
-        SYS_ST_ERR = 4
+
+        SYS_ST_BOOTSTRAP = 10,
+        SYS_ST_CFG_WAIT = 11,
+        SYS_ST_CFG_APPLY = 12,
+        SYS_ST_RUN_PREPARE = 13,
+
+        SYS_ST_RUN_ACTIVE = 20,
+        SYS_ST_RUN_BACKUP = 21,
+        SYS_ST_HOLD = 22,
+        SYS_ST_FAILSAFE = 23,
+
+        SYS_ST_SHUTDOWN = 30
 } sys_mgr_state_t;
+
+typedef enum sys_mgr_sched_policy_e {
+        SYS_MGR_SCHED_BUS_FIRST = 0,
+        SYS_MGR_SCHED_DISPATCH_FIRST = 1
+} sys_mgr_sched_policy_t;
 
 typedef struct sys_mgr_cfg_s {
         int poll_timeout_ms;
+        uint32_t bus_budget;
+        uint32_t dispatch_budget;
+        sys_mgr_sched_policy_t sched_policy;
 } sys_mgr_cfg_t;
 
 typedef struct sys_mgr_cb_s {

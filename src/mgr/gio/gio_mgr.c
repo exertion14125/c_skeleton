@@ -36,6 +36,39 @@ static dispatch_decision_t gio_dispatch_decide(void *user, const dispatch_t *d, 
         return DISPATCH_DECIDE_CONSUME;
 }
 
+static int gio_mgr_is_pollable_state(gio_mgr_state_t st)
+{
+        switch (st) {
+        case GIO_ST_CYCLE_WAIT:
+        case GIO_ST_REQ_POSTED:
+        case GIO_ST_WAIT_RESP:
+        case GIO_ST_RX_OK:
+        case GIO_ST_RX_TIMEOUT:
+        case GIO_ST_DEGRADED:
+                return 1;
+
+        case GIO_ST_INIT:
+        case GIO_ST_IDLE:
+        case GIO_ST_SHUTDOWN:
+        case GIO_ST_ERR:
+        default:
+                return 0;
+        }
+}
+
+static void gio_mgr_push_evt(gio_mgr_t *m, gio_mgr_event_t ev)
+{
+        dispatch_evt_t evt;
+
+        if (!m || !m->dispatch) {
+                return;
+        }
+
+        memset(&evt, 0, sizeof(evt));
+        evt.ev = (fsm_event_t)ev;
+        (void)dispatch_push(m->dispatch, &evt);
+}
+
 static int gio_mgr_process_dispatch(gio_mgr_t *m, uint32_t wait_ms, uint32_t budget)
 {
         uint32_t n = 0;
@@ -63,6 +96,7 @@ static int gio_mgr_send_rsp(gio_mgr_t *m, uint16_t code, uint32_t req_id, int32_
         if (!m || !m->bus) {
                 return -EINVAL;
         }
+
         return mgr_bus_send(m->bus,
                             APP_MGR_ADDR_GIO,
                             APP_MGR_ADDR_SYS,
@@ -72,85 +106,136 @@ static int gio_mgr_send_rsp(gio_mgr_t *m, uint16_t code, uint32_t req_id, int32_
                             gio_now_ms(NULL));
 }
 
-static int gio_mgr_ipc_connect(gio_mgr_t *m)
+static int gio_mgr_send_red_input_evt(gio_mgr_t *m,
+                                      uint32_t req_epoch,
+                                      int32_t link_state)
 {
-        gio_sem_cfg_t scfg;
-
-        if (!m) {
+        if (!m || !m->bus) {
                 return -EINVAL;
         }
 
-        memset(&scfg, 0, sizeof(scfg));
-        scfg.req_name = "/skeleton_gio_req_sem";
-        scfg.rsp_name = "/skeleton_gio_rsp_sem";
-        scfg.req_init = 0U;
-        scfg.rsp_init = 0U;
-
-        if (gio_shm_open(&m->shm, "/skeleton_gio_shm", 0U) != 0) {
-                return -1;
-        }
-        if (gio_shm_map(&m->shm) != 0) {
-                (void)gio_shm_close(&m->shm);
-                return -1;
-        }
-        if (gio_sem_open(&m->sem, &scfg) != 0) {
-                (void)gio_shm_close(&m->shm);
-                return -1;
-        }
-
-        return 0;
+        return mgr_bus_send(m->bus,
+                            APP_MGR_ADDR_GIO,
+                            APP_MGR_ADDR_RED,
+                            APP_MGR_MSG_GIO_RED_INPUT_EVT,
+                            (int32_t)req_epoch,
+                            link_state,
+                            gio_now_ms(NULL));
 }
 
-static void gio_mgr_ipc_disconnect(gio_mgr_t *m)
+static int gio_mgr_handle_engine_output(gio_mgr_t *m, const gio_eng_output_t *out)
 {
-        if (!m) {
-                return;
+        if (!m || !out) {
+                return -EINVAL;
         }
-        (void)gio_sem_close(&m->sem);
-        (void)gio_shm_close(&m->shm);
+
+        switch (out->action) {
+        case GIO_ENG_ACT_EXEC_DONE:
+                gio_mgr_push_evt(m, GIO_MGR_EV_RESP_OK);
+
+                (void)gio_mgr_send_rsp(m,
+                                       APP_MGR_MSG_GIO_EXEC_RSP,
+                                       out->req_id,
+                                       out->rc);
+
+                return gio_mgr_send_rsp(m,
+                                        APP_MGR_MSG_GIO_RX_DONE_EVT,
+                                        out->req_id,
+                                        out->value0);
+
+        case GIO_ENG_ACT_TIMEOUT_EVT:
+                gio_mgr_push_evt(m, GIO_MGR_EV_RESP_TIMEOUT);
+                (void)gio_mgr_send_rsp(m,
+                                       APP_MGR_MSG_GIO_TIMEOUT_EVT,
+                                       out->req_id,
+                                       out->rc);
+                return gio_mgr_send_rsp(m,
+                                        APP_MGR_MSG_GIO_DEGRADED_EVT,
+                                        out->req_id,
+                                        out->rc);
+
+        case GIO_ENG_ACT_DEGRADED_EVT:
+                gio_mgr_push_evt(m, GIO_MGR_EV_DEGRADED);
+                return gio_mgr_send_rsp(m,
+                                        APP_MGR_MSG_GIO_DEGRADED_EVT,
+                                        out->req_id,
+                                        out->rc);
+
+        case GIO_ENG_ACT_KEEP:
+        case GIO_ENG_ACT_NONE:
+        default:
+                return 0;
+        }
 }
 
-static int gio_mgr_exec_ipc(gio_mgr_t *m, uint32_t req_id, int32_t arg)
+static int gio_mgr_exec_cycle_req(gio_mgr_t *m, uint32_t req_epoch)
 {
-        uint32_t n;
-        int rc = -1;
-        gio_ipc_req_t req;
-        gio_ipc_rsp_t rsp;
+        gio_shm_ra_exec_req_t req;
+        gio_shm_ra_exec_rsp_t rsp;
 
-        if (!m) {
+        if (!m || !m->ra) {
                 return -EINVAL;
         }
 
         memset(&req, 0, sizeof(req));
-        req.req_id = req_id;
-        req.arg = arg;
+        memset(&rsp, 0, sizeof(rsp));
 
-        for (n = 0; n <= m->max_retry; ++n) {
-                if (gio_shm_write_req(&m->shm, &req) != 0) {
-                        rc = -1;
-                        continue;
-                }
-                if (gio_sem_post_req(&m->sem) != 0) {
-                        rc = -1;
-                        continue;
-                }
-                rc = gio_sem_wait_rsp(&m->sem, m->timeout_ms);
-                if (rc == 0) {
-                        if (gio_shm_read_rsp(&m->shm, &rsp) == 0) {
-                                return rsp.rc;
-                        }
-                        rc = -1;
-                }
+        req.req_id = req_epoch;
+        req.arg = 0;
+
+        gio_mgr_push_evt(m, GIO_MGR_EV_REQ_POSTED);
+
+        (void)gio_shm_ra_exec(m->ra, &req, &rsp);
+
+        return rsp.rc;
+}
+
+static int gio_mgr_run_snapshot_check(gio_mgr_t *m)
+{
+        gio_shm_ctrl_t ctrl;
+        gio_input_snapshot_t input;
+        gio_eng_output_t out;
+
+        if (!m || !m->ra || !m->engine) {
+                return -EINVAL;
         }
 
-        return rc;
+        memset(&ctrl, 0, sizeof(ctrl));
+        memset(&input, 0, sizeof(input));
+        memset(&out, 0, sizeof(out));
+
+        if (gio_shm_ra_read_ctrl(m->ra, &ctrl) != 0) {
+                return -1;
+        }
+        if (gio_shm_ra_read_input(m->ra, &input) != 0) {
+                return -1;
+        }
+
+        if (gio_engine_apply_snapshot(m->engine,
+                                      &ctrl,
+                                      &input,
+                                      gio_now_ms(NULL),
+                                      &out) != 0) {
+                return -1;
+        }
+
+        if (input.red_input.valid) {
+                (void)gio_mgr_send_red_input_evt(m,
+                                                 ctrl.req_epoch,
+                                                 (int32_t)input.red_input.link_state);
+        }
+
+        return gio_mgr_handle_engine_output(m, &out);
 }
 
 static int gio_mgr_handle_bus_msg(gio_mgr_t *m, const mgr_bus_msg_t *msg)
 {
-        int rc;
+        gio_shm_ctrl_t ctrl;
 
         if (!m || !msg) {
+                return -EINVAL;
+        }
+        if (!m->ra) {
                 return -EINVAL;
         }
 
@@ -158,13 +243,31 @@ static int gio_mgr_handle_bus_msg(gio_mgr_t *m, const mgr_bus_msg_t *msg)
                 return 0;
         }
 
-        rc = gio_mgr_exec_ipc(m, (uint32_t)msg->a, msg->b);
-        if (rc == 0) {
-                return gio_mgr_send_rsp(m, APP_MGR_MSG_GIO_EXEC_RSP, (uint32_t)msg->a, 0);
+        /*
+         * 새 cycle 시작:
+         *   req_epoch 증가 및 req timestamp 반영
+         */
+        memset(&ctrl, 0, sizeof(ctrl));
+        if (gio_shm_ra_read_ctrl(m->ra, &ctrl) != 0) {
+                return -1;
         }
 
-        (void)gio_mgr_send_rsp(m, APP_MGR_MSG_GIO_TIMEOUT_EVT, (uint32_t)msg->a, rc);
-        return gio_mgr_send_rsp(m, APP_MGR_MSG_GIO_DEGRADED_EVT, (uint32_t)msg->a, rc);
+        ctrl.req_epoch++;
+        ctrl.req_ts_ms = gio_now_ms(NULL);
+
+        if (gio_shm_ra_write_ctrl(m->ra, &ctrl) != 0) {
+                return -1;
+        }
+
+        /*
+         * IO proc 요청 트리거
+         */
+        (void)gio_mgr_exec_cycle_req(m, ctrl.req_epoch);
+
+        /*
+         * snapshot 기반 상태 판정
+         */
+        return gio_mgr_run_snapshot_check(m);
 }
 
 gio_mgr_t *alloc_gio_mgr(void)
@@ -195,6 +298,8 @@ void destroy_gio_mgr(gio_mgr_t **pm)
 
 int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
 {
+        gio_shm_ra_cfg_t racfg;
+
         if (!m) {
                 return -EINVAL;
         }
@@ -212,8 +317,6 @@ int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
         if (m->cfg.poll_timeout_ms <= 0) {
                 m->cfg.poll_timeout_ms = 100;
         }
-        m->max_retry = 2U;
-        m->timeout_ms = 100U;
 
         if (gio_mgr_build_fsm(m) != 0) {
                 return -1;
@@ -224,7 +327,40 @@ int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
         if (gio_mgr_build_obs(m) != 0) {
                 return -1;
         }
-        if (gio_mgr_ipc_connect(m) != 0) {
+
+        m->engine = alloc_gio_engine();
+        if (!m->engine) {
+                return -1;
+        }
+        if (init_gio_engine(m->engine) != 0) {
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        m->ra = alloc_gio_shm_ra();
+        if (!m->ra) {
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        memset(&racfg, 0, sizeof(racfg));
+        racfg.shm_name = "/skeleton_gio_shm";
+        racfg.req_sem_name = "/skeleton_gio_req_sem";
+        racfg.rsp_sem_name = "/skeleton_gio_rsp_sem";
+        racfg.req_sem_init = 0U;
+        racfg.rsp_sem_init = 0U;
+        racfg.max_retry = 2U;
+        racfg.timeout_ms = 100U;
+
+        if (init_gio_shm_ra(m->ra, &racfg) != 0) {
+                destroy_gio_shm_ra(&m->ra);
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        if (gio_shm_ra_connect(m->ra) != 0) {
+                destroy_gio_shm_ra(&m->ra);
+                destroy_gio_engine(&m->engine);
                 return -1;
         }
 
@@ -254,6 +390,7 @@ int start_gio_mgr(gio_mgr_t *m)
                 (void)dispatch_push(m->dispatch, &evt);
                 (void)gio_mgr_process_dispatch(m, 1U, 4U);
         }
+
         return 0;
 }
 
@@ -282,8 +419,6 @@ void deinit_gio_mgr(gio_mgr_t *m)
                 return;
         }
 
-        gio_mgr_ipc_disconnect(m);
-
         if (m->dispatch) {
                 destroy_dispatch(&m->dispatch);
         }
@@ -292,6 +427,12 @@ void deinit_gio_mgr(gio_mgr_t *m)
         }
         if (m->obs) {
                 destroy_obs(&m->obs);
+        }
+        if (m->ra) {
+                destroy_gio_shm_ra(&m->ra);
+        }
+        if (m->engine) {
+                destroy_gio_engine(&m->engine);
         }
 
         free(m->dispatch_qmem);
@@ -323,15 +464,26 @@ int gio_mgr_poll_once(gio_mgr_t *m, int timeout_ms)
                 timeout_ms = m->cfg.poll_timeout_ms;
         }
 
-        if (m->state == GIO_ST_RUNNING && m->dispatch) {
+        if (gio_mgr_is_pollable_state(m->state) && m->dispatch) {
                 if (m->bus && mgr_bus_pop_for(m->bus, APP_MGR_ADDR_GIO, &bus_msg, 0) == 1) {
                         (void)gio_mgr_handle_bus_msg(m, &bus_msg);
                 }
-                dispatch_evt_t evt;
-                memset(&evt, 0, sizeof(evt));
-                evt.ev = (fsm_event_t)GIO_MGR_EV_TICK;
-                (void)dispatch_push(m->dispatch, &evt);
-                (void)gio_mgr_process_dispatch(m, (uint32_t)((timeout_ms > 0) ? timeout_ms : 1), 8U);
+
+                /*
+                 * 주기 중 snapshot 상태를 계속 점검할 수 있도록 tick 시에도 snapshot check 수행
+                 */
+                (void)gio_mgr_run_snapshot_check(m);
+
+                {
+                        dispatch_evt_t evt;
+                        memset(&evt, 0, sizeof(evt));
+                        evt.ev = (fsm_event_t)GIO_MGR_EV_TICK;
+                        (void)dispatch_push(m->dispatch, &evt);
+                }
+
+                (void)gio_mgr_process_dispatch(m,
+                                               (uint32_t)((timeout_ms > 0) ? timeout_ms : 1),
+                                               8U);
         } else if (timeout_ms > 0) {
                 usleep((useconds_t)timeout_ms * 1000U);
         }
@@ -344,6 +496,7 @@ int gio_mgr_bind_bus(gio_mgr_t *m, mgr_bus_t *bus)
         if (!m) {
                 return -EINVAL;
         }
+
         m->bus = bus;
         return 0;
 }
@@ -351,21 +504,43 @@ int gio_mgr_bind_bus(gio_mgr_t *m, mgr_bus_t *bus)
 int gio_mgr_build_fsm(gio_mgr_t *m)
 {
         static const fsm_trans_t tbl[] = {
-                { GIO_ST_INIT,     GIO_MGR_EV_START,    GIO_ST_IDLE,     gio_guard_always, NULL },
-                { GIO_ST_IDLE,     GIO_MGR_EV_START,    GIO_ST_RUNNING,  gio_guard_always, NULL },
-                { GIO_ST_RUNNING,  GIO_MGR_EV_TICK,     GIO_ST_RUNNING,  gio_guard_always, NULL },
-                { GIO_ST_RUNNING,  GIO_MGR_EV_TIMEOUT,  GIO_ST_ERR,      gio_guard_always, NULL },
-                { GIO_ST_RUNNING,  GIO_MGR_EV_ERROR,    GIO_ST_ERR,      gio_guard_always, NULL },
-                { GIO_ST_ERR,      GIO_MGR_EV_RECOVER,  GIO_ST_IDLE,     gio_guard_always, NULL },
-                { GIO_ST_IDLE,     GIO_MGR_EV_STOP,     GIO_ST_SHUTDOWN, gio_guard_always, NULL },
-                { GIO_ST_RUNNING,  GIO_MGR_EV_STOP,     GIO_ST_SHUTDOWN, gio_guard_always, NULL },
-                { GIO_ST_ERR,      GIO_MGR_EV_STOP,     GIO_ST_SHUTDOWN, gio_guard_always, NULL }
+                { GIO_ST_INIT,       GIO_MGR_EV_START,        GIO_ST_IDLE,       gio_guard_always, NULL },
+                { GIO_ST_IDLE,       GIO_MGR_EV_START,        GIO_ST_CYCLE_WAIT, gio_guard_always, NULL },
+
+                { GIO_ST_CYCLE_WAIT, GIO_MGR_EV_TICK,         GIO_ST_REQ_POSTED, gio_guard_always, NULL },
+                { GIO_ST_REQ_POSTED, GIO_MGR_EV_REQ_POSTED,   GIO_ST_WAIT_RESP,  gio_guard_always, NULL },
+
+                { GIO_ST_WAIT_RESP,  GIO_MGR_EV_RESP_OK,      GIO_ST_RX_OK,      gio_guard_always, NULL },
+                { GIO_ST_WAIT_RESP,  GIO_MGR_EV_RESP_TIMEOUT, GIO_ST_RX_TIMEOUT, gio_guard_always, NULL },
+
+                { GIO_ST_RX_TIMEOUT, GIO_MGR_EV_DEGRADED,     GIO_ST_DEGRADED,   gio_guard_always, NULL },
+                { GIO_ST_RX_TIMEOUT, GIO_MGR_EV_TICK,         GIO_ST_CYCLE_WAIT, gio_guard_always, NULL },
+
+                { GIO_ST_RX_OK,      GIO_MGR_EV_TICK,         GIO_ST_CYCLE_WAIT, gio_guard_always, NULL },
+                { GIO_ST_DEGRADED,   GIO_MGR_EV_RECOVER,      GIO_ST_CYCLE_WAIT, gio_guard_always, NULL },
+
+                { GIO_ST_CYCLE_WAIT, GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+                { GIO_ST_REQ_POSTED, GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+                { GIO_ST_WAIT_RESP,  GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+                { GIO_ST_RX_OK,      GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+                { GIO_ST_RX_TIMEOUT, GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+                { GIO_ST_DEGRADED,   GIO_MGR_EV_ERROR,        GIO_ST_ERR,        gio_guard_always, NULL },
+
+                { GIO_ST_IDLE,       GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_CYCLE_WAIT, GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_REQ_POSTED, GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_WAIT_RESP,  GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_RX_OK,      GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_RX_TIMEOUT, GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_DEGRADED,   GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL },
+                { GIO_ST_ERR,        GIO_MGR_EV_STOP,         GIO_ST_SHUTDOWN,   gio_guard_always, NULL }
         };
         fsm_spec_t spec;
 
         if (!m) {
                 return -EINVAL;
         }
+
         if (!m->fsm) {
                 m->fsm = alloc_fsm();
                 if (!m->fsm) {
@@ -393,6 +568,7 @@ int gio_mgr_build_dispatch(gio_mgr_t *m)
         if (!m) {
                 return -EINVAL;
         }
+
         if (!m->dispatch) {
                 m->dispatch = alloc_dispatch();
                 if (!m->dispatch) {
@@ -402,7 +578,8 @@ int gio_mgr_build_dispatch(gio_mgr_t *m)
 
         if (!m->dispatch_qmem) {
                 m->dispatch_qcap = GIO_DISPATCH_QCAP;
-                m->dispatch_qmem = (dispatch_qnode_t *)calloc(m->dispatch_qcap, sizeof(dispatch_qnode_t));
+                m->dispatch_qmem = (dispatch_qnode_t *)calloc(m->dispatch_qcap,
+                                                              sizeof(dispatch_qnode_t));
                 if (!m->dispatch_qmem) {
                         return -1;
                 }
@@ -414,7 +591,12 @@ int gio_mgr_build_dispatch(gio_mgr_t *m)
         memset(&cfg, 0, sizeof(cfg));
         cfg.drop_on_full = 1;
 
-        if (dispatch_init(m->dispatch, m->dispatch_qmem, m->dispatch_qcap, &policy, NULL, &cfg) != 0) {
+        if (dispatch_init(m->dispatch,
+                          m->dispatch_qmem,
+                          m->dispatch_qcap,
+                          &policy,
+                          NULL,
+                          &cfg) != 0) {
                 return -1;
         }
 
@@ -466,34 +648,65 @@ int gio_mgr_handle_dispatch_result(gio_mgr_t *m, const dispatch_pop_result_t *re
                 if (!m->fsm) {
                         return -EINVAL;
                 }
+
                 before = fsm_get_state(m->fsm);
                 frc = fsm_step(m->fsm, m, res->evt.ev);
                 m->state = (gio_mgr_state_t)fsm_get_state(m->fsm);
+
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, (int32_t)res->evt.ev, (int32_t)res->evt.req_id, (int32_t)frc);
-                        (void)obs_push(m->obs, OBS_EVT_FSM_TR, (int32_t)before, (int32_t)res->evt.ev, (int32_t)m->state);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)res->evt.req_id,
+                                       (int32_t)frc);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_FSM_TR,
+                                       (int32_t)before,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)m->state);
                 }
                 break;
+
         case DISPATCH_POP_DROP_EPOCH:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DROP_EPOCH, (int32_t)res->evt.ev, (int32_t)res->evt.req_id, 0);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DROP_EPOCH,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)res->evt.req_id,
+                                       0);
                 }
                 break;
+
         case DISPATCH_POP_DROP_REQ:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DROP_REQ, (int32_t)res->evt.ev, (int32_t)res->evt.req_id, 0);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DROP_REQ,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)res->evt.req_id,
+                                       0);
                 }
                 break;
+
         case DISPATCH_POP_DROP_POLICY:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DROP_POLICY, (int32_t)res->evt.ev, (int32_t)res->evt.req_id, 0);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DROP_POLICY,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)res->evt.req_id,
+                                       0);
                 }
                 break;
+
         case DISPATCH_POP_DEFER:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DEFER, (int32_t)res->evt.ev, (int32_t)res->evt.req_id, res->defer_reason);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DEFER,
+                                       (int32_t)res->evt.ev,
+                                       (int32_t)res->evt.req_id,
+                                       res->defer_reason);
                 }
                 break;
+
         default:
                 break;
         }
@@ -506,6 +719,7 @@ void gio_mgr_begin_new_epoch(gio_mgr_t *m)
         if (!m) {
                 return;
         }
+
         m->epoch++;
         if (m->obs) {
                 obs_epoch_inc(m->obs);
@@ -517,6 +731,7 @@ void gio_mgr_cancel_all(gio_mgr_t *m, uint32_t flush_q)
         if (!m) {
                 return;
         }
+
         if (m->dispatch) {
                 dispatch_cancel_all(m->dispatch, (flush_q ? true : false), 1U);
                 dispatch_wakeup(m->dispatch);

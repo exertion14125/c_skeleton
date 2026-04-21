@@ -72,39 +72,88 @@ static int cfg_mgr_send_rsp(cfg_mgr_t *m, uint16_t code, uint32_t req_id, int32_
                             cfg_now_ms(NULL));
 }
 
+static uint16_t cfg_mgr_rsp_code_from_action(cfg_eng_action_t action)
+{
+        switch (action) {
+        case CFG_ENG_ACT_OPEN_DONE:
+                return APP_MGR_MSG_CFG_OPEN_RSP;
+        case CFG_ENG_ACT_ADJUST_DONE:
+                return APP_MGR_MSG_CFG_ADJUST_RSP;
+        case CFG_ENG_ACT_REOPEN_DONE:
+                return APP_MGR_MSG_CFG_REOPEN_RSP;
+        case CFG_ENG_ACT_MODIFY_DONE:
+                return APP_MGR_MSG_CFG_MODIFY_RSP;
+        case CFG_ENG_ACT_KEEP:
+        case CFG_ENG_ACT_NONE:
+        default:
+                return APP_MGR_MSG_NONE;
+        }
+}
+
+static int cfg_mgr_apply_engine(cfg_mgr_t *m,
+                                const cfg_eng_input_t *in)
+{
+        cfg_eng_output_t out;
+        uint16_t rsp_code;
+
+        if (!m || !m->engine || !in) {
+                return -EINVAL;
+        }
+
+        memset(&out, 0, sizeof(out));
+
+        if (cfg_engine_apply(m->engine, in, &out) != 0) {
+                return -1;
+        }
+
+        rsp_code = cfg_mgr_rsp_code_from_action(out.action);
+        if (rsp_code == APP_MGR_MSG_NONE) {
+                return 0;
+        }
+
+        return cfg_mgr_send_rsp(m, rsp_code, out.req_id, out.rc);
+}
+
 static int cfg_mgr_handle_bus_msg(cfg_mgr_t *m, const mgr_bus_msg_t *msg)
 {
-        int rc = -EINVAL;
+        cfg_eng_input_t in;
 
         if (!m || !msg) {
                 return -EINVAL;
         }
+        if (!m->engine) {
+                return -EINVAL;
+        }
+
+        memset(&in, 0, sizeof(in));
+        in.req_id = (uint32_t)msg->a;
+        in.now_ms = cfg_now_ms(NULL);
 
         switch (msg->code) {
         case APP_MGR_MSG_SYS_CFG_OPEN_REQ:
-                rc = cfg_repo_open(&m->repo, "/tmp/skeleton.cfg");
-                return cfg_mgr_send_rsp(m, APP_MGR_MSG_CFG_OPEN_RSP, (uint32_t)msg->a, rc);
-        case APP_MGR_MSG_SYS_CFG_ADJUST_REQ: {
-                cfg_adjust_req_t req;
-                req.value = msg->b;
-                rc = cfg_repo_adjust(&m->repo, &req);
-                return cfg_mgr_send_rsp(m, APP_MGR_MSG_CFG_ADJUST_RSP, (uint32_t)msg->a, rc);
-        }
-        case APP_MGR_MSG_SYS_CFG_REOPEN_REQ:
-                rc = cfg_repo_reopen(&m->repo);
-                return cfg_mgr_send_rsp(m, APP_MGR_MSG_CFG_REOPEN_RSP, (uint32_t)msg->a, rc);
-        case APP_MGR_MSG_SYS_CFG_MODIFY_REQ: {
-                cfg_modify_req_t req;
-                req.key = (int32_t)msg->a;
-                req.value = msg->b;
-                rc = cfg_repo_modify(&m->repo, &req);
-                return cfg_mgr_send_rsp(m, APP_MGR_MSG_CFG_MODIFY_RSP, (uint32_t)msg->a, rc);
-        }
-        default:
+                in.kind = CFG_ENG_IN_OPEN_REQ;
                 break;
+
+        case APP_MGR_MSG_SYS_CFG_ADJUST_REQ:
+                in.kind = CFG_ENG_IN_ADJUST_REQ;
+                in.arg0 = msg->b;
+                break;
+
+        case APP_MGR_MSG_SYS_CFG_REOPEN_REQ:
+                in.kind = CFG_ENG_IN_REOPEN_REQ;
+                break;
+
+        case APP_MGR_MSG_SYS_CFG_MODIFY_REQ:
+                in.kind = CFG_ENG_IN_MODIFY_REQ;
+                in.arg0 = msg->a;
+                in.arg1 = msg->b;
+                break;
+
+        default:
+                return 0;
         }
 
-        return 0;
+        return cfg_mgr_apply_engine(m, &in);
 }
 
 cfg_mgr_t *alloc_cfg_mgr(void)
@@ -160,6 +209,16 @@ int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
                 return -1;
         }
         if (cfg_mgr_build_obs(m) != 0) {
+                return -1;
+        }
+
+        m->engine = alloc_cfg_engine();
+        if (!m->engine) {
+                return -1;
+        }
+
+        if (init_cfg_engine(m->engine) != 0) {
+                destroy_cfg_engine(&m->engine);
                 return -1;
         }
 
@@ -225,6 +284,9 @@ void deinit_cfg_mgr(cfg_mgr_t *m)
         }
         if (m->obs) {
                 destroy_obs(&m->obs);
+        }
+        if (m->engine) {
+                destroy_cfg_engine(&m->engine);
         }
 
         free(m->dispatch_qmem);

@@ -5,7 +5,7 @@
 #include <pthread.h>
 
 #include "mgr/red/red_mgr.h"
-#include "mgr/red/red_policy.h"
+#include "engine/red/red_engine.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -46,7 +46,7 @@ struct red_mgr_s {
         uint32_t dispatch_qcap;
         uint32_t obs_ring_cap;
 
-        red_policy_t policy;
+        red_engine_t *engine;
 };
 
 extern int red_mgr_build_fsm(red_mgr_t *m);

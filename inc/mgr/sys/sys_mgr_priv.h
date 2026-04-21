@@ -5,6 +5,7 @@
 #include <pthread.h>
 
 #include "mgr/sys/sys_mgr.h"
+#include "engine/sys/sys_engine.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -44,6 +45,8 @@ struct sys_mgr_s {
         obs_evt_t *obs_ring_mem;
         uint32_t dispatch_qcap;
         uint32_t obs_ring_cap;
+
+        sys_engine_t *engine;
 };
 
 extern int sys_mgr_build_fsm(sys_mgr_t *m);

@@ -5,7 +5,7 @@
 #include <pthread.h>
 
 #include "mgr/cfg/cfg_mgr.h"
-#include "mgr/cfg/cfg_repo.h"
+#include "engine/cfg/cfg_engine.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -46,7 +46,7 @@ struct cfg_mgr_s {
         uint32_t dispatch_qcap;
         uint32_t obs_ring_cap;
 
-        cfg_repo_t repo;
+        cfg_engine_t *engine;
 };
 
 extern int cfg_mgr_build_fsm(cfg_mgr_t *m);
