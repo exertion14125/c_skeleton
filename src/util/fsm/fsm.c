@@ -6,10 +6,11 @@
 
 /// @brief FSM instance
 struct fsm_s {
-        const fsm_spec_t *spec; ///< FSM specification
-        fsm_hook_t hook;        ///< optional FSM hooks
+        fsm_spec_t spec_store;  ///< Store spec for internal use (in case caller's spec is on stack and goes out of scope)
+        const fsm_spec_t *spec; ///< Pointer to FSM specification (points to spec_store)
+        fsm_hook_t hook;        ///< FSM hooks (transition hook, etc.)
         fsm_state_t state;      ///< current state
-        fsm_observer_t observer; ///< optional observer (shallow copy)
+        fsm_observer_t observer;///< optional observer (shallow copy)
 };
 
 /// @brief Find transition for given state and event
@@ -59,9 +60,13 @@ int fsm_init(fsm_t *f, const fsm_spec_t *spec, const fsm_hook_t *hook)
         if (!f || !spec || !spec->table || spec->table_len == 0) {
                 return -1;
         }
+
         memset(f, 0, sizeof(*f));
-        f->spec = spec;
+
+        f->spec_store = *spec;
+        f->spec = &f->spec_store;
         f->state = spec->init_state;
+
         if (hook) {
                 f->hook = *hook;
         }
