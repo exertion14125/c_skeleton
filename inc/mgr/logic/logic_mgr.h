@@ -38,6 +38,12 @@ extern void deinit_logic_mgr(logic_mgr_t *m);
 extern logic_mgr_state_t get_logic_mgr_state(const logic_mgr_t *m);
 extern int logic_mgr_poll_once(logic_mgr_t *m, int timeout_ms);
 
+extern int logic_mgr_start_runloop(logic_mgr_t *m);
+extern int logic_mgr_request_start(logic_mgr_t *m);
+extern int logic_mgr_stop_runloop(logic_mgr_t *m);
+
 extern int logic_mgr_bind_bus(logic_mgr_t *m, mgr_bus_t *bus);
+
+extern logic_mgr_t *bootstrap_logic_mgr(void);
 
 #endif /* __MGR_LOGIC_LOGIC_MGR_H__ */

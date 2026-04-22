@@ -13,6 +13,7 @@
 #include "mgr/cfg/cfg_mgr.h"
 #include "mgr/gio/gio_mgr.h"
 #include "mgr/red/red_mgr.h"
+#include "mgr/logic/logic_mgr.h"
 #include "mgr/sys/sys_mgr.h"
 #include "mgr/ui/ui_mgr_bootstrap.h"
 #include "mgr/ui/ui_snapshot_mgr.h"
@@ -25,6 +26,7 @@ static ui_mgr_t* ui_mgr = NULL;
 static cfg_mgr_t* cfg_mgr = NULL;
 static gio_mgr_t* gio_mgr = NULL;
 static red_mgr_t* red_mgr = NULL;
+static logic_mgr_t* logic_mgr = NULL;
 static sys_mgr_t* sys_mgr = NULL;
 static volatile bool g_ui_log_init = 0;
 static volatile bool g_init = 0;
@@ -52,9 +54,6 @@ void proc_user_mon_signal(int signo, siginfo_t *info, void *uctx)
         // int opt = info->si_value.sival_int;
         (void)info;
         // Process user signal.
-        printf("\r\n");
-        printf("Received user monitor signal: %d\r\n", signo);
-        LOGI_T("MAIN", "Received user monitor signal: %d\r\n", signo);
         (void)ui_mgr_request_start(ui_mgr);
 }
 
@@ -154,6 +153,7 @@ static const mgr_bus_addr_t g_mgr_addrs[] = {
         APP_MGR_ADDR_CFG,       /// Configuration Manager. Configuration file read/write and management.
         APP_MGR_ADDR_GIO,       /// General I/O Manager. RS-485/CAN BUS I/O control and management.
         APP_MGR_ADDR_RED,       /// Redundancy Manager. Redundancy control and management for high availability.
+        APP_MGR_ADDR_LOGIC,     /// Logic Manager. User logic control and management.
         APP_MGR_ADDR_UI         /// Monitoring UI Manager. User interface management.
 };
 
@@ -220,6 +220,16 @@ int main(int argc, char *argv[])
                 goto skeleton_exit;
         }
 
+        logic_mgr = bootstrap_logic_mgr();
+        if (!logic_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap LOGIC manager.\n");
+                goto skeleton_exit;
+        }
+        sys_mgr = bootstrap_sys_mgr();
+        if (!sys_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap SYS manager.\n");
+                goto skeleton_exit;
+        }
         //==== ui log init
         ui_mgr = bootstrap_ui_mgr();
         if (ui_mgr == NULL) {
@@ -227,12 +237,6 @@ int main(int argc, char *argv[])
                 goto skeleton_exit;
         } else {
                 g_ui_log_init = true;
-        }
-
-        sys_mgr = bootstrap_sys_mgr();
-        if (!sys_mgr) {
-                LOGE_T("MAIN", "Failed to bootstrap SYS manager.\n");
-                goto skeleton_exit;
         }
 
         //===== Bind bus to managers.
@@ -246,6 +250,10 @@ int main(int argc, char *argv[])
         }
         if (red_mgr_bind_bus(red_mgr, mgr_bus) != 0) {
                 LOGE_T("MAIN", "Failed to bind RED manager bus.\n");
+                goto skeleton_exit;
+        }
+        if (logic_mgr_bind_bus(logic_mgr, mgr_bus) != 0) {
+                LOGE_T("MAIN", "Failed to bind LOGIC manager bus.\n");
                 goto skeleton_exit;
         }
         if (sys_mgr_bind_bus(sys_mgr, mgr_bus) != 0) {
@@ -278,15 +286,18 @@ int main(int argc, char *argv[])
                 LOGE_T("MAIN", "Failed to start RED manager runloop.\n");
                 goto skeleton_exit;
         }
-        if (ui_mgr_start_runloop(ui_mgr) != 0) {
-                LOGE_T("MAIN", "Failed to start UI manager runloop.\n");
+        if (logic_mgr_start_runloop(logic_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start LOGIC manager runloop.\n");
                 goto skeleton_exit;
         }
         if (sys_mgr_start_runloop(sys_mgr) != 0) {
                 LOGE_T("MAIN", "Failed to start SYS manager runloop.\n");
                 goto skeleton_exit;
         }
-
+        if (ui_mgr_start_runloop(ui_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to start UI manager runloop.\n");
+                goto skeleton_exit;
+        }
         //===== Request start: CFG -> GIO -> RED -> UI -> SYS
         if (cfg_mgr_request_start(cfg_mgr) != 0) {
                 LOGE_T("MAIN", "Failed to request CFG manager start.\n");
@@ -300,15 +311,18 @@ int main(int argc, char *argv[])
                 LOGE_T("MAIN", "Failed to request RED manager start.\n");
                 goto skeleton_exit;
         }
-        if (ui_mgr_request_start(ui_mgr) != 0) {
-                LOGE_T("MAIN", "Failed to request UI manager start.\n");
+        if (logic_mgr_request_start(logic_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request LOGIC manager start.\n");
                 goto skeleton_exit;
         }
         if (sys_mgr_request_start(sys_mgr) != 0) {
                 LOGE_T("MAIN", "Failed to request SYS manager start.\n");
                 goto skeleton_exit;
         }
-
+        if (ui_mgr_request_start(ui_mgr) != 0) {
+                LOGE_T("MAIN", "Failed to request UI manager start.\n");
+                goto skeleton_exit;
+        }
 
         g_init = true;
 
@@ -328,11 +342,14 @@ skeleton_exit:
         if (mgr_bus) {
                 mgr_bus_wakeup(mgr_bus);
         }
+        if (ui_mgr) {
+                (void)ui_mgr_stop_runloop(ui_mgr);
+        }
         if (sys_mgr) {
                 (void)sys_mgr_stop_runloop(sys_mgr);
         }
-        if (ui_mgr) {
-                (void)ui_mgr_stop_runloop(ui_mgr);
+        if (logic_mgr) {
+                (void)logic_mgr_stop_runloop(logic_mgr);
         }
         if (red_mgr) {
                 (void)red_mgr_stop_runloop(red_mgr);
@@ -348,13 +365,17 @@ skeleton_exit:
                 destroy_ui_snapshot_mgr(&ui_snapshot_mgr);
                 ui_snapshot_mgr = NULL;
         }
+        if (ui_mgr) {
+                destroy_ui_mgr(&ui_mgr);
+                ui_mgr = NULL;
+        }
         if (sys_mgr) {
                 destroy_sys_mgr(&sys_mgr);
                 sys_mgr = NULL;
         }
-        if (ui_mgr) {
-                destroy_ui_mgr(&ui_mgr);
-                ui_mgr = NULL;
+        if (logic_mgr) {
+                destroy_logic_mgr(&logic_mgr);
+                logic_mgr = NULL;
         }
         if (red_mgr) {
                 destroy_red_mgr(&red_mgr);
