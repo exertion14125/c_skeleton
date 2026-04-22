@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "resource/cfg/cfg_request_dto.h"
+
 typedef enum cfg_eng_input_kind_e {
         CFG_ENG_IN_NONE = 0,
         CFG_ENG_IN_OPEN_REQ = 1,
@@ -35,6 +37,12 @@ typedef struct cfg_eng_output_s {
         int32_t rc;
         int32_t value0;
         int32_t value1;
+
+        uint32_t logic_map_valid;
+        uint32_t logic_out_card_no;
+        uint32_t logic_out_card_type;
+        uint32_t logic_out_ch0;
+        uint32_t logic_out_ch1;
 } cfg_eng_output_t;
 
 typedef struct cfg_engine_s cfg_engine_t;
@@ -48,5 +56,9 @@ void deinit_cfg_engine(cfg_engine_t *e);
 int cfg_engine_apply(cfg_engine_t *e,
                      const cfg_eng_input_t *in,
                      cfg_eng_output_t *out);
+
+int cfg_engine_apply_request_dto(cfg_engine_t *e,
+                                 const cfg_request_dto_t *req,
+                                 cfg_eng_output_t *out);
 
 #endif /* __ENGINE_CFG_CFG_ENGINE_H__ */

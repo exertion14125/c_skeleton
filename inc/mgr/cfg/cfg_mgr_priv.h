@@ -6,6 +6,8 @@
 
 #include "mgr/cfg/cfg_mgr.h"
 #include "engine/cfg/cfg_engine.h"
+#include "ra/cfg/cfg_request_ra.h"
+#include "ra/cfg/cfg_result_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -21,6 +23,14 @@ typedef enum cfg_mgr_event_e {
         CFG_MGR_EV_STOP = 6,
         CFG_MGR_EV_SHUTDOWN = 7
 } cfg_mgr_event_t;
+
+typedef struct cfg_logic_map_cache_s {
+        uint32_t valid;
+        uint32_t out_card_no;
+        uint32_t out_card_type;
+        uint32_t out_ch0;
+        uint32_t out_ch1;
+} cfg_logic_map_cache_t;
 
 struct cfg_mgr_s {
         pthread_t runloop_tid;
@@ -47,6 +57,11 @@ struct cfg_mgr_s {
         uint32_t obs_ring_cap;
 
         cfg_engine_t *engine;
+
+        cfg_request_ra_t *request_ra;
+        cfg_result_ra_t *result_ra;
+
+        cfg_logic_map_cache_t logic_map_cache;
 };
 
 extern int cfg_mgr_build_fsm(cfg_mgr_t *m);

@@ -8,6 +8,7 @@
 #include "engine/logic/logic_engine.h"
 #include "engine/logic/logic_output_map.h"
 #include "ra/gio/gio_shm_ra.h"
+#include "ra/logic/logic_cfg_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -51,6 +52,7 @@ struct logic_mgr_s {
         logic_engine_t *engine;
         logic_output_map_t *out_map;
         gio_shm_ra_t *ra;
+        logic_cfg_ra_t *cfg_ra;
 };
 
 extern int logic_mgr_build_fsm(logic_mgr_t *m);

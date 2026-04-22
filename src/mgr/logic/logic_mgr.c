@@ -73,6 +73,21 @@ static int logic_mgr_send_rsp(logic_mgr_t *m, uint16_t code, uint32_t req_id, in
                             logic_now_ms(NULL));
 }
 
+static int logic_mgr_send_cfg_rsp(logic_mgr_t *m, uint32_t req_id, int32_t rc)
+{
+        if (!m || !m->bus) {
+                return -EINVAL;
+        }
+
+        return mgr_bus_send(m->bus,
+                            APP_MGR_ADDR_LOGIC,
+                            APP_MGR_ADDR_SYS,
+                            APP_MGR_MSG_LOGIC_CFG_RSP,
+                            (int32_t)req_id,
+                            rc,
+                            logic_now_ms(NULL));
+}
+
 static int logic_mgr_write_output_snapshot(logic_mgr_t *m,
                                            const gio_output_snapshot_t *out_snap)
 {
@@ -85,58 +100,77 @@ static int logic_mgr_write_output_snapshot(logic_mgr_t *m,
 
 static int logic_mgr_handle_bus_msg(logic_mgr_t *m, const mgr_bus_msg_t *msg)
 {
-        logic_eng_output_t out;
-        gio_input_snapshot_t in_snap;
-        gio_output_snapshot_t out_snap;
-
         if (!m || !msg) {
                 return -EINVAL;
         }
-        if (!m->engine || !m->ra || !m->out_map) {
+        if (!m->engine || !m->ra) {
                 return -EINVAL;
         }
 
-        if (msg->code != APP_MGR_MSG_SYS_LOGIC_EXEC_REQ) {
-                return 0;
+        if (msg->code == APP_MGR_MSG_SYS_LOGIC_CFG_REQ) {
+                logic_cfg_dto_t dto;
+
+                if (!m->cfg_ra || !m->out_map) {
+                        return logic_mgr_send_cfg_rsp(m, (uint32_t)msg->a, -1);
+                }
+
+                memset(&dto, 0, sizeof(dto));
+                if (logic_cfg_ra_read(m->cfg_ra, &dto) != 0 || !dto.valid) {
+                        return logic_mgr_send_cfg_rsp(m, (uint32_t)msg->a, -1);
+                }
+
+                if (logic_output_map_apply_cfg(m->out_map, &dto.out_map_cfg) != 0) {
+                        return logic_mgr_send_cfg_rsp(m, (uint32_t)msg->a, -1);
+                }
+
+                return logic_mgr_send_cfg_rsp(m, (uint32_t)msg->a, 0);
         }
 
-        memset(&in_snap, 0, sizeof(in_snap));
-        memset(&out, 0, sizeof(out));
-        memset(&out_snap, 0, sizeof(out_snap));
+        if (msg->code == APP_MGR_MSG_SYS_LOGIC_EXEC_REQ) {
+                logic_eng_output_t out;
+                gio_input_snapshot_t in_snap;
+                gio_output_snapshot_t out_snap;
 
-        if (gio_shm_ra_read_input(m->ra, &in_snap) != 0) {
+                memset(&in_snap, 0, sizeof(in_snap));
+                memset(&out, 0, sizeof(out));
+                memset(&out_snap, 0, sizeof(out_snap));
+
+                if (gio_shm_ra_read_input(m->ra, &in_snap) != 0) {
+                        return logic_mgr_send_rsp(m,
+                                                  APP_MGR_MSG_LOGIC_EXEC_RSP,
+                                                  (uint32_t)msg->a,
+                                                  -1);
+                }
+
+                if (logic_engine_apply_snapshot(m->engine,
+                                                &in_snap,
+                                                logic_now_ms(NULL),
+                                                &out) != 0) {
+                        return logic_mgr_send_rsp(m,
+                                                  APP_MGR_MSG_LOGIC_EXEC_RSP,
+                                                  (uint32_t)msg->a,
+                                                  -1);
+                }
+
+                if (logic_output_map_apply(m->out_map,
+                                           &out,
+                                           logic_now_ms(NULL),
+                                           &out_snap) != 0) {
+                        return logic_mgr_send_rsp(m,
+                                                  APP_MGR_MSG_LOGIC_EXEC_RSP,
+                                                  (uint32_t)msg->a,
+                                                  -1);
+                }
+
+                (void)logic_mgr_write_output_snapshot(m, &out_snap);
+
                 return logic_mgr_send_rsp(m,
                                           APP_MGR_MSG_LOGIC_EXEC_RSP,
-                                          (uint32_t)msg->a,
-                                          -1);
+                                          out.req_id,
+                                          out.rc);
         }
 
-        if (logic_engine_apply_snapshot(m->engine,
-                                        &in_snap,
-                                        logic_now_ms(NULL),
-                                        &out) != 0) {
-                return logic_mgr_send_rsp(m,
-                                          APP_MGR_MSG_LOGIC_EXEC_RSP,
-                                          (uint32_t)msg->a,
-                                          -1);
-        }
-
-        if (logic_output_map_apply(m->out_map,
-                                   &out,
-                                   logic_now_ms(NULL),
-                                   &out_snap) != 0) {
-                return logic_mgr_send_rsp(m,
-                                          APP_MGR_MSG_LOGIC_EXEC_RSP,
-                                          (uint32_t)msg->a,
-                                          -1);
-        }
-
-        (void)logic_mgr_write_output_snapshot(m, &out_snap);
-
-        return logic_mgr_send_rsp(m,
-                                  APP_MGR_MSG_LOGIC_EXEC_RSP,
-                                  out.req_id,
-                                  out.rc);
+        return 0;
 }
 
 logic_mgr_t *alloc_logic_mgr(void)
@@ -213,7 +247,21 @@ int init_logic_mgr(logic_mgr_t *m, const logic_mgr_cfg_t *cfg, const logic_mgr_c
                 return -1;
         }
 
-        if (init_logic_output_map(m->out_map) != 0) {
+        if (init_logic_output_map(m->out_map, &m->cfg.out_map_cfg) != 0) {
+                destroy_logic_output_map(&m->out_map);
+                destroy_logic_engine(&m->engine);
+                return -1;
+        }
+
+        m->cfg_ra = alloc_logic_cfg_ra();
+        if (!m->cfg_ra) {
+                destroy_logic_output_map(&m->out_map);
+                destroy_logic_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_logic_cfg_ra(m->cfg_ra) != 0) {
+                destroy_logic_cfg_ra(&m->cfg_ra);
                 destroy_logic_output_map(&m->out_map);
                 destroy_logic_engine(&m->engine);
                 return -1;
@@ -221,11 +269,11 @@ int init_logic_mgr(logic_mgr_t *m, const logic_mgr_cfg_t *cfg, const logic_mgr_c
 
         m->ra = alloc_gio_shm_ra();
         if (!m->ra) {
+                destroy_logic_cfg_ra(&m->cfg_ra);
                 destroy_logic_output_map(&m->out_map);
                 destroy_logic_engine(&m->engine);
                 return -1;
         }
-        
 
         memset(&racfg, 0, sizeof(racfg));
         racfg.shm_name = "/skeleton_gio_shm";
@@ -238,6 +286,7 @@ int init_logic_mgr(logic_mgr_t *m, const logic_mgr_cfg_t *cfg, const logic_mgr_c
 
         if (init_gio_shm_ra(m->ra, &racfg) != 0) {
                 destroy_gio_shm_ra(&m->ra);
+                destroy_logic_cfg_ra(&m->cfg_ra);
                 destroy_logic_output_map(&m->out_map);
                 destroy_logic_engine(&m->engine);
                 return -1;
@@ -245,6 +294,7 @@ int init_logic_mgr(logic_mgr_t *m, const logic_mgr_cfg_t *cfg, const logic_mgr_c
 
         if (gio_shm_ra_connect(m->ra) != 0) {
                 destroy_gio_shm_ra(&m->ra);
+                destroy_logic_cfg_ra(&m->cfg_ra);
                 destroy_logic_output_map(&m->out_map);
                 destroy_logic_engine(&m->engine);
                 return -1;
@@ -316,6 +366,9 @@ void deinit_logic_mgr(logic_mgr_t *m)
         }
         if (m->ra) {
                 destroy_gio_shm_ra(&m->ra);
+        }
+        if (m->cfg_ra) {
+                destroy_logic_cfg_ra(&m->cfg_ra);
         }
         if (m->out_map) {
                 destroy_logic_output_map(&m->out_map);

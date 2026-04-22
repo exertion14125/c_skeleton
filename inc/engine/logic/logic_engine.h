@@ -5,6 +5,8 @@
 
 #include "resource/gio/gio_snapshot_dto.h"
 
+#define LOGIC_OUTPUT_VALUE_MAX   8U
+
 typedef enum logic_eng_input_kind_e {
         LOGIC_ENG_IN_NONE = 0,
         LOGIC_ENG_IN_EXEC_REQ = 1,
@@ -29,8 +31,9 @@ typedef struct logic_eng_output_s {
         logic_eng_action_t action;
         uint32_t req_id;
         int32_t rc;
-        int32_t value0;
-        int32_t value1;
+
+        uint32_t value_count;
+        int32_t values[LOGIC_OUTPUT_VALUE_MAX];
 } logic_eng_output_t;
 
 typedef struct logic_engine_s logic_engine_t;

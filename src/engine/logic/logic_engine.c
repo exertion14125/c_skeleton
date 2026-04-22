@@ -62,12 +62,14 @@ int logic_engine_apply(logic_engine_t *e,
 
                 out->action = LOGIC_ENG_ACT_EXEC_DONE;
                 out->rc = 0;
-                out->value0 = in->arg0;
-                out->value1 = in->arg1;
+                out->value_count = 2U;
+                out->values[0] = in->arg0;
+                out->values[1] = in->arg1;
                 return 0;
 
         case LOGIC_ENG_IN_TICK:
                 out->action = LOGIC_ENG_ACT_KEEP;
+                out->rc = 0;
                 return 0;
 
         case LOGIC_ENG_IN_NONE:
@@ -82,9 +84,8 @@ int logic_engine_apply_snapshot(logic_engine_t *e,
                                 logic_eng_output_t *out)
 {
         uint32_t i;
-        int32_t v0 = 0;
-        int32_t v1 = 0;
-        uint32_t found = 0U;
+        uint32_t ch;
+        uint32_t n = 0U;
 
         if (!e || !in || !out) {
                 return -1;
@@ -97,16 +98,17 @@ int logic_engine_apply_snapshot(logic_engine_t *e,
                 if (!in->cards[i].valid) {
                         continue;
                 }
-                if (in->cards[i].channel_count == 0U) {
-                        continue;
+
+                for (ch = 0; ch < in->cards[i].channel_count && ch < GIO_MAX_IO_PER_CARD; ++ch) {
+                        if (n >= LOGIC_OUTPUT_VALUE_MAX) {
+                                break;
+                        }
+                        out->values[n++] = in->cards[i].value[ch];
                 }
 
-                v0 = in->cards[i].value[0];
-                if (in->cards[i].channel_count > 1U) {
-                        v1 = in->cards[i].value[1];
+                if (n >= LOGIC_OUTPUT_VALUE_MAX) {
+                        break;
                 }
-                found = 1U;
-                break;
         }
 
         e->exec_count++;
@@ -114,9 +116,8 @@ int logic_engine_apply_snapshot(logic_engine_t *e,
         e->last_rc = 0;
 
         out->action = LOGIC_ENG_ACT_EXEC_DONE;
-        out->rc = found ? 0 : 0;
-        out->value0 = v0;
-        out->value1 = v1;
+        out->rc = 0;
+        out->value_count = n;
 
         return 0;
 }

@@ -29,6 +29,7 @@ typedef enum app_mgr_msg_code_e {
         APP_MGR_MSG_SYS_RED_EVAL_REQ          = 0x1301,
 
         APP_MGR_MSG_SYS_LOGIC_EXEC_REQ        = 0x1401,
+        APP_MGR_MSG_SYS_LOGIC_CFG_REQ         = 0x1402,
 
         APP_MGR_MSG_CFG_OPEN_RSP              = 0x2101,
         APP_MGR_MSG_CFG_ADJUST_RSP            = 0x2102,
@@ -49,7 +50,8 @@ typedef enum app_mgr_msg_code_e {
         APP_MGR_MSG_UI_NOTIFY_EVT             = 0x2401,
 
         APP_MGR_MSG_LOGIC_EXEC_RSP            = 0x2501,
-
+        APP_MGR_MSG_LOGIC_CFG_RSP             = 0x2502,
+        
         APP_MGR_MSG_HEALTH_REPORT_EVT         = 0x3001
 } app_mgr_msg_code_t;
 

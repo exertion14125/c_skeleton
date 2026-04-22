@@ -8,6 +8,14 @@
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
 
+#include "ra/cfg/cfg_request_ra.h"
+#include "ra/cfg/cfg_result_ra.h"
+#include "ra/logic/logic_cfg_ra.h"
+#include "resource/cfg/cfg_request_dto.h"
+#include "resource/cfg/cfg_result_dto.h"
+#include "resource/logic/logic_cfg_dto.h"
+#include "resource/gio/gio_snapshot_dto.h"
+
 #define SYS_DISPATCH_QCAP    64U
 #define SYS_OBS_RING_CAP     128U
 
@@ -90,6 +98,62 @@ static sys_eng_input_kind_t sys_mgr_gio_msg_to_input_kind(uint16_t code)
         }
 }
 
+static int sys_mgr_send_cfg_request(sys_mgr_t *m,
+                                    uint16_t code,
+                                    const cfg_request_dto_t *req)
+{
+        if (!m || !m->bus || !m->cfg_request_ra || !req) {
+                return -EINVAL;
+        }
+
+        if (cfg_request_ra_write(m->cfg_request_ra, req) != 0) {
+            return -1;
+        }
+
+        return mgr_bus_send(m->bus,
+                            APP_MGR_ADDR_SYS,
+                            APP_MGR_ADDR_CFG,
+                            code,
+                            (int32_t)req->version,
+                            0,
+                            sys_now_ms(NULL));
+}
+
+static int sys_mgr_apply_logic_cfg_from_cfg_result(sys_mgr_t *m)
+{
+        cfg_result_dto_t cfgres;
+        logic_cfg_dto_t logiccfg;
+
+        if (!m || !m->cfg_result_ra) {
+                return -EINVAL;
+        }
+
+        memset(&cfgres, 0, sizeof(cfgres));
+        if (cfg_result_ra_read(m->cfg_result_ra, &cfgres) != 0 || !cfgres.valid) {
+                return -1;
+        }
+
+        memset(&logiccfg, 0, sizeof(logiccfg));
+        logiccfg.version = cfgres.version;
+        logiccfg.valid = 1U;
+        logiccfg.ts_ms = sys_now_ms(NULL);
+
+        logiccfg.out_map_cfg.route_count = 2U;
+
+        logiccfg.out_map_cfg.routes[0].valid = 1U;
+        logiccfg.out_map_cfg.routes[0].out_card_no = cfgres.logic_map.out_card_no;
+        logiccfg.out_map_cfg.routes[0].out_card_type = cfgres.logic_map.out_card_type;
+        logiccfg.out_map_cfg.routes[0].out_value_index = 0U;
+        logiccfg.out_map_cfg.routes[0].out_ch = cfgres.logic_map.out_ch0;
+
+        logiccfg.out_map_cfg.routes[1].valid = 1U;
+        logiccfg.out_map_cfg.routes[1].out_card_no = cfgres.logic_map.out_card_no;
+        logiccfg.out_map_cfg.routes[1].out_card_type = cfgres.logic_map.out_card_type;
+        logiccfg.out_map_cfg.routes[1].out_value_index = 1U;
+        logiccfg.out_map_cfg.routes[1].out_ch = cfgres.logic_map.out_ch1;
+
+        return sys_mgr_send_logic_cfg(m, &logiccfg);
+}
 
 int sys_mgr_send_logic_exec(sys_mgr_t *m, uint32_t req_id, int32_t arg)
 {
@@ -106,6 +170,25 @@ int sys_mgr_send_logic_exec(sys_mgr_t *m, uint32_t req_id, int32_t arg)
                             sys_now_ms(NULL));
 }
 
+int sys_mgr_send_logic_cfg(sys_mgr_t *m, const logic_cfg_dto_t *cfg)
+{
+        if (!m || !m->bus || !m->logic_cfg_ra || !cfg) {
+                return -EINVAL;
+        }
+
+        if (logic_cfg_ra_write(m->logic_cfg_ra, cfg) != 0) {
+                return -1;
+        }
+
+        return mgr_bus_send(m->bus,
+                            APP_MGR_ADDR_SYS,
+                            APP_MGR_ADDR_LOGIC,
+                            APP_MGR_MSG_SYS_LOGIC_CFG_REQ,
+                            (int32_t)cfg->version,
+                            0,
+                            sys_now_ms(NULL));
+}
+
 static int sys_mgr_execute_action(sys_mgr_t *m, const sys_eng_output_t *out)
 {
         if (!m || !out) {
@@ -113,11 +196,64 @@ static int sys_mgr_execute_action(sys_mgr_t *m, const sys_eng_output_t *out)
         }
 
         switch (out->action) {
-        case SYS_ENG_ACT_SEND_CFG_OPEN:
-                return sys_mgr_send_cfg_open(m, out->req_id);
+        case SYS_ENG_ACT_SEND_CFG_OPEN: {
+                cfg_request_dto_t req;
 
-        case SYS_ENG_ACT_SEND_CFG_ADJUST:
-                return sys_mgr_send_cfg_adjust(m, out->req_id, out->value0);
+                memset(&req, 0, sizeof(req));
+                req.version = out->req_id;
+                req.valid = 1U;
+                req.ts_ms = sys_now_ms(NULL);
+                req.req_kind = CFG_REQ_KIND_OPEN;
+
+                return sys_mgr_send_cfg_open(m, &req);
+        }
+
+        case SYS_ENG_ACT_SEND_CFG_ADJUST: {
+                cfg_request_dto_t req;
+
+                memset(&req, 0, sizeof(req));
+                req.version = out->req_id;
+                req.valid = 1U;
+                req.ts_ms = sys_now_ms(NULL);
+                req.req_kind = CFG_REQ_KIND_ADJUST;
+                req.arg0 = out->value0;
+                req.arg1 = out->value1;
+
+                return sys_mgr_send_cfg_adjust(m, &req);
+        }
+
+#ifdef SYS_ENG_ACT_SEND_CFG_REOPEN
+        case SYS_ENG_ACT_SEND_CFG_REOPEN: {
+                cfg_request_dto_t req;
+
+                memset(&req, 0, sizeof(req));
+                req.version = out->req_id;
+                req.valid = 1U;
+                req.ts_ms = sys_now_ms(NULL);
+                req.req_kind = CFG_REQ_KIND_REOPEN;
+
+                return sys_mgr_send_cfg_reopen(m, &req);
+        }
+#endif
+
+#ifdef SYS_ENG_ACT_SEND_CFG_MODIFY
+        case SYS_ENG_ACT_SEND_CFG_MODIFY: {
+                cfg_request_dto_t req;
+
+                memset(&req, 0, sizeof(req));
+                req.version = out->req_id;
+                req.valid = 1U;
+                req.ts_ms = sys_now_ms(NULL);
+                req.req_kind = CFG_REQ_KIND_MODIFY;
+
+                req.modify.out_card_no = (uint32_t)out->value0;
+                req.modify.out_card_type = GIO_CARD_TYPE_DO;
+                req.modify.out_ch0 = (uint32_t)out->value1;
+                req.modify.out_ch1 = (uint32_t)out->value1 + 1U;
+
+                return sys_mgr_send_cfg_modify(m, &req);
+        }
+#endif
 
         case SYS_ENG_ACT_SEND_GIO_EXEC:
                 return sys_mgr_send_gio_exec(m, out->req_id, out->value0);
@@ -128,33 +264,53 @@ static int sys_mgr_execute_action(sys_mgr_t *m, const sys_eng_output_t *out)
         case SYS_ENG_ACT_APPROVE_FAILOVER:
                 m->state = SYS_ST_RUN_ACTIVE;
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, 9001, (int32_t)out->req_id, 1);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       9001,
+                                       (int32_t)out->req_id,
+                                       1);
                 }
                 return 0;
 
         case SYS_ENG_ACT_REJECT_FAILOVER:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, 9002, (int32_t)out->req_id, (int32_t)out->reason_code);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       9002,
+                                       (int32_t)out->req_id,
+                                       (int32_t)out->reason_code);
                 }
                 return 0;
 
         case SYS_ENG_ACT_APPROVE_RECOVER:
                 m->state = SYS_ST_RUN_BACKUP;
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, 9003, (int32_t)out->req_id, 1);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       9003,
+                                       (int32_t)out->req_id,
+                                       1);
                 }
                 return 0;
 
         case SYS_ENG_ACT_REJECT_RECOVER:
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, 9004, (int32_t)out->req_id, (int32_t)out->reason_code);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       9004,
+                                       (int32_t)out->req_id,
+                                       (int32_t)out->reason_code);
                 }
                 return 0;
 
         case SYS_ENG_ACT_ENTER_HOLD:
                 m->state = SYS_ST_HOLD;
                 if (m->obs) {
-                        (void)obs_push(m->obs, OBS_EVT_DISPATCH, 9005, (int32_t)out->req_id, 1);
+                        (void)obs_push(m->obs,
+                                       OBS_EVT_DISPATCH,
+                                       9005,
+                                       (int32_t)out->req_id,
+                                       1);
                 }
                 return 0;
 
@@ -230,7 +386,19 @@ static int sys_mgr_apply_engine(sys_mgr_t *m,
 
 static int sys_mgr_on_cfg_rsp(sys_mgr_t *m, const mgr_bus_msg_t *msg)
 {
-        return sys_mgr_apply_engine(m, SYS_ENG_IN_CFG_RSP, msg);
+        int rc;
+
+        if (!m || !msg) {
+                return -EINVAL;
+        }
+
+        rc = sys_mgr_apply_engine(m, SYS_ENG_IN_CFG_RSP, msg);
+
+        if (msg->b == 0) {
+                (void)sys_mgr_apply_logic_cfg_from_cfg_result(m);
+        }
+
+        return rc;
 }
 
 static int sys_mgr_on_gio_rsp(sys_mgr_t *m, const mgr_bus_msg_t *msg)
@@ -263,15 +431,7 @@ static int sys_mgr_on_logic_rsp(sys_mgr_t *m, const mgr_bus_msg_t *msg)
                 return -EINVAL;
         }
 
-        if (m->obs) {
-                (void)obs_push(m->obs,
-                               OBS_EVT_DISPATCH,
-                               (int32_t)msg->code,
-                               msg->a,
-                               msg->b);
-        }
-
-        return 0;
+        return sys_mgr_apply_engine(m, SYS_ENG_IN_LOGIC_RSP, msg);
 }
 
 static int sys_mgr_route_bus_msg(sys_mgr_t *m, const mgr_bus_msg_t *msg)
@@ -300,6 +460,7 @@ static int sys_mgr_route_bus_msg(sys_mgr_t *m, const mgr_bus_msg_t *msg)
                 return sys_mgr_on_red_rsp(m, msg);
 
         case APP_MGR_MSG_LOGIC_EXEC_RSP:
+        case APP_MGR_MSG_LOGIC_CFG_RSP:
                 return sys_mgr_on_logic_rsp(m, msg);
 
         default:
@@ -501,6 +662,48 @@ int init_sys_mgr(sys_mgr_t *m, const sys_mgr_cfg_t *cfg, const sys_mgr_cb_t *cb)
                 return -1;
         }
 
+        m->cfg_request_ra = alloc_cfg_request_ra();
+        if (!m->cfg_request_ra) {
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_cfg_request_ra(m->cfg_request_ra) != 0) {
+                destroy_cfg_request_ra(&m->cfg_request_ra);
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
+        m->cfg_result_ra = alloc_cfg_result_ra();
+        if (!m->cfg_result_ra) {
+                destroy_cfg_request_ra(&m->cfg_request_ra);
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_cfg_result_ra(m->cfg_result_ra) != 0) {
+                destroy_cfg_result_ra(&m->cfg_result_ra);
+                destroy_cfg_request_ra(&m->cfg_request_ra);
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
+        m->logic_cfg_ra = alloc_logic_cfg_ra();
+        if (!m->logic_cfg_ra) {
+                destroy_cfg_result_ra(&m->cfg_result_ra);
+                destroy_cfg_request_ra(&m->cfg_request_ra);
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_logic_cfg_ra(m->logic_cfg_ra) != 0) {
+                destroy_logic_cfg_ra(&m->logic_cfg_ra);
+                destroy_cfg_result_ra(&m->cfg_result_ra);
+                destroy_cfg_request_ra(&m->cfg_request_ra);
+                destroy_sys_engine(&m->engine);
+                return -1;
+        }
+
         m->state = SYS_ST_IDLE;
         return 0;
 }
@@ -569,6 +772,15 @@ void deinit_sys_mgr(sys_mgr_t *m)
         }
         if (m->obs) {
                 destroy_obs(&m->obs);
+        }
+        if (m->logic_cfg_ra) {
+                destroy_logic_cfg_ra(&m->logic_cfg_ra);
+        }
+        if (m->cfg_result_ra) {
+                destroy_cfg_result_ra(&m->cfg_result_ra);
+        }
+        if (m->cfg_request_ra) {
+                destroy_cfg_request_ra(&m->cfg_request_ra);
         }
         if (m->engine) {
                 destroy_sys_engine(&m->engine);
@@ -641,64 +853,32 @@ int sys_mgr_bind_bus(sys_mgr_t *m, mgr_bus_t *bus)
         return 0;
 }
 
-int sys_mgr_send_cfg_open(sys_mgr_t *m, uint32_t req_id)
+int sys_mgr_send_cfg_open(sys_mgr_t *m, const cfg_request_dto_t *req)
 {
-        if (!m || !m->bus) {
-                return -EINVAL;
-        }
-
-        return mgr_bus_send(m->bus,
-                            APP_MGR_ADDR_SYS,
-                            APP_MGR_ADDR_CFG,
-                            APP_MGR_MSG_SYS_CFG_OPEN_REQ,
-                            (int32_t)req_id,
-                            0,
-                            sys_now_ms(NULL));
+        return sys_mgr_send_cfg_request(m,
+                                        APP_MGR_MSG_SYS_CFG_OPEN_REQ,
+                                        req);
 }
 
-int sys_mgr_send_cfg_adjust(sys_mgr_t *m, uint32_t req_id, int32_t value)
+int sys_mgr_send_cfg_adjust(sys_mgr_t *m, const cfg_request_dto_t *req)
 {
-        if (!m || !m->bus) {
-                return -EINVAL;
-        }
-
-        return mgr_bus_send(m->bus,
-                            APP_MGR_ADDR_SYS,
-                            APP_MGR_ADDR_CFG,
-                            APP_MGR_MSG_SYS_CFG_ADJUST_REQ,
-                            (int32_t)req_id,
-                            value,
-                            sys_now_ms(NULL));
+        return sys_mgr_send_cfg_request(m,
+                                        APP_MGR_MSG_SYS_CFG_ADJUST_REQ,
+                                        req);
 }
 
-int sys_mgr_send_cfg_reopen(sys_mgr_t *m, uint32_t req_id)
+int sys_mgr_send_cfg_reopen(sys_mgr_t *m, const cfg_request_dto_t *req)
 {
-        if (!m || !m->bus) {
-                return -EINVAL;
-        }
-
-        return mgr_bus_send(m->bus,
-                            APP_MGR_ADDR_SYS,
-                            APP_MGR_ADDR_CFG,
-                            APP_MGR_MSG_SYS_CFG_REOPEN_REQ,
-                            (int32_t)req_id,
-                            0,
-                            sys_now_ms(NULL));
+        return sys_mgr_send_cfg_request(m,
+                                        APP_MGR_MSG_SYS_CFG_REOPEN_REQ,
+                                        req);
 }
 
-int sys_mgr_send_cfg_modify(sys_mgr_t *m, uint32_t req_id, int32_t value)
+int sys_mgr_send_cfg_modify(sys_mgr_t *m, const cfg_request_dto_t *req)
 {
-        if (!m || !m->bus) {
-                return -EINVAL;
-        }
-
-        return mgr_bus_send(m->bus,
-                            APP_MGR_ADDR_SYS,
-                            APP_MGR_ADDR_CFG,
-                            APP_MGR_MSG_SYS_CFG_MODIFY_REQ,
-                            (int32_t)req_id,
-                            value,
-                            sys_now_ms(NULL));
+        return sys_mgr_send_cfg_request(m,
+                                        APP_MGR_MSG_SYS_CFG_MODIFY_REQ,
+                                        req);
 }
 
 int sys_mgr_send_gio_exec(sys_mgr_t *m, uint32_t req_id, int32_t arg)

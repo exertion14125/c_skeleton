@@ -8,6 +8,11 @@
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
 
+#include "ra/cfg/cfg_result_ra.h"
+#include "resource/cfg/cfg_result_dto.h"
+#include "resource/cfg/cfg_request_dto.h"
+#include "resource/gio/gio_snapshot_dto.h"
+
 #define CFG_DISPATCH_QCAP    64U
 #define CFG_OBS_RING_CAP     128U
 
@@ -90,19 +95,49 @@ static uint16_t cfg_mgr_rsp_code_from_action(cfg_eng_action_t action)
         }
 }
 
-static int cfg_mgr_apply_engine(cfg_mgr_t *m,
-                                const cfg_eng_input_t *in)
+static int cfg_mgr_store_result(cfg_mgr_t *m,
+                                uint32_t version,
+                                const cfg_eng_output_t *out)
+{
+        cfg_result_dto_t dto;
+
+        if (!m || !m->result_ra || !out) {
+                return -EINVAL;
+        }
+
+        memset(&dto, 0, sizeof(dto));
+        dto.version = version;
+        dto.valid = 1U;
+        dto.ts_ms = cfg_now_ms(NULL);
+
+        if (out->logic_map_valid) {
+                dto.logic_map.out_card_no = out->logic_out_card_no;
+                dto.logic_map.out_card_type = out->logic_out_card_type;
+                dto.logic_map.out_ch0 = out->logic_out_ch0;
+                dto.logic_map.out_ch1 = out->logic_out_ch1;
+        } else {
+                dto.logic_map.out_card_no = 0U;
+                dto.logic_map.out_card_type = GIO_CARD_TYPE_DO;
+                dto.logic_map.out_ch0 = 0U;
+                dto.logic_map.out_ch1 = 1U;
+        }
+
+        return cfg_result_ra_write(m->result_ra, &dto);
+}
+
+static int cfg_mgr_apply_engine_request_dto(cfg_mgr_t *m,
+                                            const cfg_request_dto_t *req)
 {
         cfg_eng_output_t out;
         uint16_t rsp_code;
 
-        if (!m || !m->engine || !in) {
+        if (!m || !m->engine || !req) {
                 return -EINVAL;
         }
 
         memset(&out, 0, sizeof(out));
 
-        if (cfg_engine_apply(m->engine, in, &out) != 0) {
+        if (cfg_engine_apply_request_dto(m->engine, req, &out) != 0) {
                 return -1;
         }
 
@@ -111,49 +146,41 @@ static int cfg_mgr_apply_engine(cfg_mgr_t *m,
                 return 0;
         }
 
+        if (out.rc == 0) {
+                (void)cfg_mgr_store_result(m, out.req_id, &out);
+        }
+
         return cfg_mgr_send_rsp(m, rsp_code, out.req_id, out.rc);
 }
 
 static int cfg_mgr_handle_bus_msg(cfg_mgr_t *m, const mgr_bus_msg_t *msg)
 {
-        cfg_eng_input_t in;
+        cfg_request_dto_t reqdto;
 
         if (!m || !msg) {
                 return -EINVAL;
         }
-        if (!m->engine) {
+        if (!m->engine || !m->request_ra) {
                 return -EINVAL;
         }
 
-        memset(&in, 0, sizeof(in));
-        in.req_id = (uint32_t)msg->a;
-        in.now_ms = cfg_now_ms(NULL);
-
         switch (msg->code) {
         case APP_MGR_MSG_SYS_CFG_OPEN_REQ:
-                in.kind = CFG_ENG_IN_OPEN_REQ;
-                break;
-
         case APP_MGR_MSG_SYS_CFG_ADJUST_REQ:
-                in.kind = CFG_ENG_IN_ADJUST_REQ;
-                in.arg0 = msg->b;
-                break;
-
         case APP_MGR_MSG_SYS_CFG_REOPEN_REQ:
-                in.kind = CFG_ENG_IN_REOPEN_REQ;
-                break;
-
         case APP_MGR_MSG_SYS_CFG_MODIFY_REQ:
-                in.kind = CFG_ENG_IN_MODIFY_REQ;
-                in.arg0 = msg->a;
-                in.arg1 = msg->b;
                 break;
 
         default:
                 return 0;
         }
 
-        return cfg_mgr_apply_engine(m, &in);
+        memset(&reqdto, 0, sizeof(reqdto));
+        if (cfg_request_ra_read(m->request_ra, &reqdto) != 0 || !reqdto.valid) {
+                return -1;
+        }
+
+        return cfg_mgr_apply_engine_request_dto(m, &reqdto);
 }
 
 cfg_mgr_t *alloc_cfg_mgr(void)
@@ -222,6 +249,40 @@ int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
                 return -1;
         }
 
+        m->request_ra = alloc_cfg_request_ra();
+        if (!m->request_ra) {
+                destroy_cfg_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_cfg_request_ra(m->request_ra) != 0) {
+                destroy_cfg_request_ra(&m->request_ra);
+                destroy_cfg_engine(&m->engine);
+                return -1;
+        }
+
+        m->result_ra = alloc_cfg_result_ra();
+        if (!m->result_ra) {
+                destroy_cfg_request_ra(&m->request_ra);
+                destroy_cfg_engine(&m->engine);
+                return -1;
+        }
+
+        if (init_cfg_result_ra(m->result_ra) != 0) {
+                destroy_cfg_result_ra(&m->result_ra);
+                destroy_cfg_request_ra(&m->request_ra);
+                destroy_cfg_engine(&m->engine);
+                return -1;
+        }
+
+        
+
+        m->logic_map_cache.valid = 1U;
+        m->logic_map_cache.out_card_no = 0U;
+        m->logic_map_cache.out_card_type = GIO_CARD_TYPE_DO;
+        m->logic_map_cache.out_ch0 = 0U;
+        m->logic_map_cache.out_ch1 = 1U;
+
         m->state = CFG_ST_IDLE;
         return 0;
 }
@@ -287,6 +348,12 @@ void deinit_cfg_mgr(cfg_mgr_t *m)
         }
         if (m->engine) {
                 destroy_cfg_engine(&m->engine);
+        }
+        if (m->result_ra) {
+                destroy_cfg_result_ra(&m->result_ra);
+        }
+        if (m->request_ra) {
+                destroy_cfg_request_ra(&m->request_ra);
         }
 
         free(m->dispatch_qmem);

@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #include "util/mgr_bus/mgr_bus.h"
+#include "resource/cfg/cfg_request_dto.h"
+#include "resource/logic/logic_cfg_dto.h"
 
 typedef struct sys_mgr_s sys_mgr_t;
 
@@ -60,12 +62,16 @@ extern int sys_mgr_request_start(sys_mgr_t *m);
 extern int sys_mgr_stop_runloop(sys_mgr_t *m);
 
 extern int sys_mgr_bind_bus(sys_mgr_t *m, mgr_bus_t *bus);
-extern int sys_mgr_send_cfg_open(sys_mgr_t *m, uint32_t req_id);
-extern int sys_mgr_send_cfg_adjust(sys_mgr_t *m, uint32_t req_id, int32_t value);
-extern int sys_mgr_send_cfg_reopen(sys_mgr_t *m, uint32_t req_id);
-extern int sys_mgr_send_cfg_modify(sys_mgr_t *m, uint32_t req_id, int32_t value);
+
+extern int sys_mgr_send_cfg_open(sys_mgr_t *m, const cfg_request_dto_t *req);
+extern int sys_mgr_send_cfg_adjust(sys_mgr_t *m, const cfg_request_dto_t *req);
+extern int sys_mgr_send_cfg_reopen(sys_mgr_t *m, const cfg_request_dto_t *req);
+extern int sys_mgr_send_cfg_modify(sys_mgr_t *m, const cfg_request_dto_t *req);
+
 extern int sys_mgr_send_gio_exec(sys_mgr_t *m, uint32_t req_id, int32_t arg);
 extern int sys_mgr_send_red_eval(sys_mgr_t *m, uint32_t req_id);
+extern int sys_mgr_send_logic_exec(sys_mgr_t *m, uint32_t req_id, int32_t arg);
+extern int sys_mgr_send_logic_cfg(sys_mgr_t *m, const logic_cfg_dto_t *cfg);
 
 extern sys_mgr_t *bootstrap_sys_mgr(void);
 

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "util/mgr_bus/mgr_bus.h"
+#include "engine/logic/logic_output_map.h"
 
 typedef struct logic_mgr_s logic_mgr_t;
 
@@ -17,6 +18,7 @@ typedef enum logic_mgr_state_e {
 
 typedef struct logic_mgr_cfg_s {
         int poll_timeout_ms;
+        logic_output_map_cfg_t out_map_cfg;
 } logic_mgr_cfg_t;
 
 typedef struct logic_mgr_cb_s {
