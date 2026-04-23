@@ -4,6 +4,8 @@
 
 #include "mgr/gio/gio_mgr_priv.h"
 
+#define GIO_THREAD_STACK_SIZE         (64 * 1024) //64Kbyte
+
 #define GIO_RUNLOOP_IDLE_SLEEP_US    (100 * 1000)
 #define GIO_RUNLOOP_ERR_SLEEP_US     (100 * 1000)
 
@@ -61,7 +63,11 @@ int gio_mgr_start_runloop(gio_mgr_t *m)
         m->start_req = 0U;
         m->started = 0U;
 
-        if (pthread_create(&m->runloop_tid, NULL, gio_mgr_runloop_thread_main, m) != 0) {
+        pthread_attr_t pth_attr;
+        pthread_attr_init(&pth_attr);
+        pthread_attr_setscope(&pth_attr, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setstacksize(&pth_attr, GIO_THREAD_STACK_SIZE);
+        if (pthread_create(&m->runloop_tid, &pth_attr, gio_mgr_runloop_thread_main, m) != 0) {
                 m->runloop_run = 0U;
                 return -errno;
         }

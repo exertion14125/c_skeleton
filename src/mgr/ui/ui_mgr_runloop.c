@@ -10,6 +10,8 @@
 #include "mgr/ui/ui_mgr.h"
 #include "util/log/log_util.h"
 
+#define UI_THREAD_STACK_SIZE         (64 * 1024) //64Kbyte
+
 #define UI_RUNLOOP_IDLE_SLEEP_US   (100 * 1000)
 #define UI_RUNLOOP_ERR_SLEEP_US    (100 * 1000)
 
@@ -76,7 +78,11 @@ int ui_mgr_start_runloop(ui_mgr_t *mgr)
         mgr->start_req = 0U;
         mgr->started = 0U;
 
-        if (pthread_create(&mgr->runloop_tid, NULL, ui_mgr_runloop_thread_main, mgr) != 0) {
+        pthread_attr_t pth_attr;
+        pthread_attr_init(&pth_attr);
+        pthread_attr_setscope(&pth_attr, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setstacksize(&pth_attr, UI_THREAD_STACK_SIZE);
+        if (pthread_create(&mgr->runloop_tid, &pth_attr, ui_mgr_runloop_thread_main, mgr) != 0) {
                 mgr->runloop_run = 0U;
                 return -errno;
         }

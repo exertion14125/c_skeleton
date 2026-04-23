@@ -172,7 +172,7 @@ mgr_bus_t *create_sample_mgr_bus(void)
 
 /// @brief Main function. Common argument pointer declare.
 /// @param argc argument count.
-/// @param argv argumnet value.
+/// @param argv argument value.
 int main(int argc, char *argv[]) 
 {
         mgr_bus_t *mgr_bus = NULL;

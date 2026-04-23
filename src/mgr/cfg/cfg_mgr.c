@@ -209,6 +209,15 @@ void destroy_cfg_mgr(cfg_mgr_t **pm)
         free(m);
 }
 
+/// @brief Initialize the CFG manager with the provided configuration and callbacks. 
+/// This function sets up the internal state of the manager,
+/// including its finite state machine, dispatch mechanism, and observation system.
+/// It also allocates and initializes the configuration engine and request/result resource arrays. 
+/// The manager is prepared to handle configuration requests and manage configuration data after this initialization.
+/// @param m The CFG manager instance to initialize
+/// @param cfg The configuration parameters for the CFG manager
+/// @param cb The callback functions for the CFG manager
+/// @return 0 on success, or a negative error code on failure
 int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
 {
         if (!m) {
@@ -287,6 +296,11 @@ int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
         return 0;
 }
 
+/// @brief Start the CFG manager's main run loop. 
+/// This function triggers the manager to begin processing events 
+/// and handling configuration requests.
+/// @param m The CFG manager instance to start
+/// @return 0 on success, or a negative error code on failure
 int start_cfg_mgr(cfg_mgr_t *m)
 {
         int rc = 0;
@@ -312,6 +326,10 @@ int start_cfg_mgr(cfg_mgr_t *m)
         return 0;
 }
 
+/// @brief Stop the CFG manager's main run loop.
+/// This function triggers the manager to stop processing events 
+/// and handling configuration requests.
+/// @param m The CFG manager instance to stop.
 void stop_cfg_mgr(cfg_mgr_t *m)
 {
         if (!m) {
@@ -331,6 +349,9 @@ void stop_cfg_mgr(cfg_mgr_t *m)
         }
 }
 
+/// @brief Deinitialize the CFG manager, releasing all resources 
+/// and preparing it for destruction.
+/// @param m The CFG manager instance to deinitialize.
 void deinit_cfg_mgr(cfg_mgr_t *m)
 {
         if (!m) {
@@ -365,6 +386,9 @@ void deinit_cfg_mgr(cfg_mgr_t *m)
         m->state = CFG_ST_SHUTDOWN;
 }
 
+/// @brief Get the current state of the CFG manager's finite state machine (FSM).
+/// @param m The CFG manager instance for which to get the state.
+/// @return The current state of the CFG manager, or CFG_ST_ERR if the manager instance is invalid.
 cfg_mgr_state_t get_cfg_mgr_state(const cfg_mgr_t *m)
 {
         if (!m) {
@@ -373,6 +397,12 @@ cfg_mgr_state_t get_cfg_mgr_state(const cfg_mgr_t *m)
         return m->state;
 }
 
+/// @brief Poll the CFG manager once, allowing it to process events and handle configuration requests.
+/// This function should be called periodically to ensure that the manager can perform its tasks.
+/// @param m The CFG manager instance to poll.
+/// @param timeout_ms The maximum time in milliseconds to wait for events. 
+/// If negative, the manager's default poll timeout will be used.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_poll_once(cfg_mgr_t *m, int timeout_ms)
 {
         mgr_bus_msg_t bus_msg;
@@ -401,6 +431,10 @@ int cfg_mgr_poll_once(cfg_mgr_t *m, int timeout_ms)
         return 0;
 }
 
+/// @brief Bind the CFG manager to a manager bus, allowing it to send and receive messages with other managers in the system.
+/// @param m The CFG manager instance to bind.
+/// @param bus The manager bus instance to bind to.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_bind_bus(cfg_mgr_t *m, mgr_bus_t *bus)
 {
         if (!m) {
@@ -410,6 +444,9 @@ int cfg_mgr_bind_bus(cfg_mgr_t *m, mgr_bus_t *bus)
         return 0;
 }
 
+/// @brief Build the finite state machine (FSM) for the CFG manager.
+/// @param m The CFG manager instance for which to build the FSM.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_build_fsm(cfg_mgr_t *m)
 {
         static const fsm_trans_t tbl[] = {
@@ -447,6 +484,9 @@ int cfg_mgr_build_fsm(cfg_mgr_t *m)
         return 0;
 }
 
+/// @brief Build the dispatch mechanism for the CFG manager.
+/// @param m The CFG manager instance for which to build the dispatch mechanism.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_build_dispatch(cfg_mgr_t *m)
 {
         dispatch_policy_t policy;
@@ -483,6 +523,9 @@ int cfg_mgr_build_dispatch(cfg_mgr_t *m)
         return 0;
 }
 
+/// @brief Build the observation mechanism for the CFG manager.
+/// @param m The CFG manager instance for which to build the observation mechanism.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_build_obs(cfg_mgr_t *m)
 {
         if (!m) {
@@ -511,6 +554,12 @@ int cfg_mgr_build_obs(cfg_mgr_t *m)
         return 0;
 }
 
+/// @brief Handle the result of a dispatch pop operation. 
+/// This function processes the result of popping an event from the dispatch queue,
+/// updating the FSM state and pushing relevant observation events.
+/// @param m The CFG manager instance.
+/// @param res The result of the dispatch pop operation.
+/// @return 0 on success, or a negative error code on failure.
 int cfg_mgr_handle_dispatch_result(cfg_mgr_t *m, const dispatch_pop_result_t *res)
 {
         fsm_step_rc_t frc;

@@ -2,6 +2,8 @@
 
 #include "mgr/sys/sys_mgr.h"
 
+/// @brief Bootstrap function for SYS manager.
+/// @return Pointer to the initialized SYS manager, or NULL on failure.
 sys_mgr_t *bootstrap_sys_mgr(void)
 {
         sys_mgr_t *m;

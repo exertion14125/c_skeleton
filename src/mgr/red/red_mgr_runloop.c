@@ -4,6 +4,8 @@
 
 #include "mgr/red/red_mgr_priv.h"
 
+#define RED_THREAD_STACK_SIZE         (64 * 1024) //64Kbyte
+
 #define RED_RUNLOOP_IDLE_SLEEP_US    (100 * 1000)
 #define RED_RUNLOOP_ERR_SLEEP_US     (100 * 1000)
 
@@ -61,7 +63,11 @@ int red_mgr_start_runloop(red_mgr_t *m)
         m->start_req = 0U;
         m->started = 0U;
 
-        if (pthread_create(&m->runloop_tid, NULL, red_mgr_runloop_thread_main, m) != 0) {
+        pthread_attr_t pth_attr;
+        pthread_attr_init(&pth_attr);
+        pthread_attr_setscope(&pth_attr, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setstacksize(&pth_attr, RED_THREAD_STACK_SIZE);
+        if (pthread_create(&m->runloop_tid, &pth_attr, red_mgr_runloop_thread_main, m) != 0) {
                 m->runloop_run = 0U;
                 return -errno;
         }

@@ -4,8 +4,10 @@
 
 #include "mgr/logic/logic_mgr_priv.h"
 
-#define LOGIC_RUNLOOP_IDLE_SLEEP_US    (100 * 1000)
-#define LOGIC_RUNLOOP_ERR_SLEEP_US     (100 * 1000)
+#define LOGIC_THREAD_STACK_SIZE         (64 * 1024) //64Kbyte
+
+#define LOGIC_RUNLOOP_IDLE_SLEEP_US     (100 * 1000)
+#define LOGIC_RUNLOOP_ERR_SLEEP_US      (100 * 1000)
 
 static void *logic_mgr_runloop_thread_main(void *arg)
 {
@@ -61,7 +63,11 @@ int logic_mgr_start_runloop(logic_mgr_t *m)
         m->start_req = 0U;
         m->started = 0U;
 
-        if (pthread_create(&m->runloop_tid, NULL, logic_mgr_runloop_thread_main, m) != 0) {
+        pthread_attr_t pth_attr;
+        pthread_attr_init(&pth_attr);
+        pthread_attr_setscope(&pth_attr, PTHREAD_SCOPE_SYSTEM);
+        pthread_attr_setstacksize(&pth_attr, LOGIC_THREAD_STACK_SIZE);
+        if (pthread_create(&m->runloop_tid, &pth_attr, logic_mgr_runloop_thread_main, m) != 0) {
                 m->runloop_run = 0U;
                 return -errno;
         }
