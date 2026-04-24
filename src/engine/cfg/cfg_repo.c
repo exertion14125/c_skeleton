@@ -1,7 +1,7 @@
 #include <string.h>
 #include <errno.h>
 
-#include "mgr/cfg/cfg_repo.h"
+#include "engine/cfg/cfg_repo.h"
 
 int cfg_repo_open(cfg_repo_t *r, const char *path)
 {

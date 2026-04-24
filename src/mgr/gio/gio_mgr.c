@@ -7,6 +7,7 @@
 #include "mgr/gio/gio_mgr_priv.h"
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
+#include "util/ipc/shm_layout.h"
 
 #define GIO_DISPATCH_QCAP    64U
 #define GIO_OBS_RING_CAP     128U
@@ -296,10 +297,13 @@ void destroy_gio_mgr(gio_mgr_t **pm)
         free(m);
 }
 
+/// @brief Initialize GIO manager.
+/// @param m Pointer to allocated GIO manager. Should not be NULL.
+/// @param cfg Pointer to GIO manager configuration. Can be NULL for defaults.
+/// @param cb Pointer to GIO manager callbacks. Can be NULL for no callbacks.
+/// @return 0 on success, negative value on failure.
 int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
 {
-        gio_shm_ra_cfg_t racfg;
-
         if (!m) {
                 return -EINVAL;
         }
@@ -337,8 +341,43 @@ int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
                 return -1;
         }
 
+        m->owner_ra = alloc_gio_shm_owner_ra();
+        if (!m->owner_ra) {
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        gio_shm_owner_ra_cfg_t owner_cfg;
+        gio_shm_ra_cfg_t racfg;
+
+        memset(&owner_cfg, 0, sizeof(owner_cfg));
+        owner_cfg.shm_name = "/skeleton_gio_shm";
+        owner_cfg.shm_size = sizeof(system_shm_t) + GIO_IPC_BLOCK_BYTES;
+        owner_cfg.layout_version = SHM_LAYOUT_VERSION;
+        owner_cfg.generation = 1U;
+
+        if (init_gio_shm_owner_ra(m->owner_ra, &owner_cfg) != 0) {
+                destroy_gio_shm_owner_ra(&m->owner_ra);
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        if (gio_shm_owner_ra_open(m->owner_ra) != 0) {
+                destroy_gio_shm_owner_ra(&m->owner_ra);
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        if (gio_shm_owner_ra_init_header(m->owner_ra) != 0 ||
+            gio_shm_owner_ra_validate_header(m->owner_ra) != 0) {
+                destroy_gio_shm_owner_ra(&m->owner_ra);
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
         m->ra = alloc_gio_shm_ra();
         if (!m->ra) {
+                destroy_gio_shm_owner_ra(&m->owner_ra);
                 destroy_gio_engine(&m->engine);
                 return -1;
         }
@@ -354,12 +393,23 @@ int init_gio_mgr(gio_mgr_t *m, const gio_mgr_cfg_t *cfg, const gio_mgr_cb_t *cb)
 
         if (init_gio_shm_ra(m->ra, &racfg) != 0) {
                 destroy_gio_shm_ra(&m->ra);
+                destroy_gio_shm_owner_ra(&m->owner_ra);
+                destroy_gio_engine(&m->engine);
+                return -1;
+        }
+
+        if (gio_shm_ra_set_base(m->ra,
+                                gio_shm_owner_ra_get_base_ptr(m->owner_ra),
+                                gio_shm_owner_ra_get_size(m->owner_ra)) != 0) {
+                destroy_gio_shm_ra(&m->ra);
+                destroy_gio_shm_owner_ra(&m->owner_ra);
                 destroy_gio_engine(&m->engine);
                 return -1;
         }
 
         if (gio_shm_ra_connect(m->ra) != 0) {
                 destroy_gio_shm_ra(&m->ra);
+                destroy_gio_shm_owner_ra(&m->owner_ra);
                 destroy_gio_engine(&m->engine);
                 return -1;
         }
@@ -389,6 +439,13 @@ int start_gio_mgr(gio_mgr_t *m)
                 evt.ev = (fsm_event_t)GIO_MGR_EV_START;
                 (void)dispatch_push(m->dispatch, &evt);
                 (void)gio_mgr_process_dispatch(m, 1U, 4U);
+        }
+
+        /// RUN_INIT: reflect segment ready state for downstream readers.
+        gio_shm_ctrl_t ctrl;
+        if (m->ra && gio_shm_ra_read_ctrl(m->ra, &ctrl) == 0) {
+                ctrl.flags |= 0x1U;
+                (void)gio_shm_ra_write_ctrl(m->ra, &ctrl);
         }
 
         return 0;
@@ -430,6 +487,9 @@ void deinit_gio_mgr(gio_mgr_t *m)
         }
         if (m->ra) {
                 destroy_gio_shm_ra(&m->ra);
+        }
+        if (m->owner_ra) {
+                destroy_gio_shm_owner_ra(&m->owner_ra);
         }
         if (m->engine) {
                 destroy_gio_engine(&m->engine);

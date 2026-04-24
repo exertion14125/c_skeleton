@@ -202,17 +202,20 @@ int main(int argc, char *argv[])
         }
 
         //===== Bootstrap domain managers.
+        
+        gio_mgr = bootstrap_gio_mgr();
+        if (!gio_mgr) {
+                LOGE_T("MAIN", "Failed to bootstrap GIO manager.\n");
+                goto skeleton_exit;
+        }
+
         cfg_mgr = bootstrap_cfg_mgr();
         if (!cfg_mgr) {
                 LOGE_T("MAIN", "Failed to bootstrap CFG manager.\n");
                 goto skeleton_exit;
         }
 
-        gio_mgr = bootstrap_gio_mgr();
-        if (!gio_mgr) {
-                LOGE_T("MAIN", "Failed to bootstrap GIO manager.\n");
-                goto skeleton_exit;
-        }
+        
 
         red_mgr = bootstrap_red_mgr();
         if (!red_mgr) {
@@ -273,7 +276,7 @@ int main(int argc, char *argv[])
                 goto skeleton_exit;
         }
 
-        //===== Start runloops: CFG -> GIO -> RED -> UI -> SYS
+        //===== BOOTSTRAP/RUN_INIT: Start runloops (workers first, SYS orchestration follows)
         if (cfg_mgr_start_runloop(cfg_mgr) != 0) {
                 LOGE_T("MAIN", "Failed to start CFG manager runloop.\n");
                 goto skeleton_exit;
@@ -298,7 +301,7 @@ int main(int argc, char *argv[])
                 LOGE_T("MAIN", "Failed to start UI manager runloop.\n");
                 goto skeleton_exit;
         }
-        //===== Request start: CFG -> GIO -> RED -> UI -> SYS
+        //===== BOOTSTRAP: Request start (SYS starts after domain managers are ready)
         if (cfg_mgr_request_start(cfg_mgr) != 0) {
                 LOGE_T("MAIN", "Failed to request CFG manager start.\n");
                 goto skeleton_exit;
@@ -339,6 +342,7 @@ int main(int argc, char *argv[])
                 usleep(100 * 1000);
         }
 skeleton_exit:
+        //===== STOP/SHUTDOWN: runloop stop in reverse dependency order.
         if (mgr_bus) {
                 mgr_bus_wakeup(mgr_bus);
         }
@@ -354,11 +358,11 @@ skeleton_exit:
         if (red_mgr) {
                 (void)red_mgr_stop_runloop(red_mgr);
         }
-        if (gio_mgr) {
-                (void)gio_mgr_stop_runloop(gio_mgr);
-        }
         if (cfg_mgr) {
                 (void)cfg_mgr_stop_runloop(cfg_mgr);
+        }
+        if (gio_mgr) {
+                (void)gio_mgr_stop_runloop(gio_mgr);
         }
 
         if (ui_snapshot_mgr) {
@@ -381,13 +385,13 @@ skeleton_exit:
                 destroy_red_mgr(&red_mgr);
                 red_mgr = NULL;
         }
-        if (gio_mgr) {
-                destroy_gio_mgr(&gio_mgr);
-                gio_mgr = NULL;
-        }
         if (cfg_mgr) {
                 destroy_cfg_mgr(&cfg_mgr);
                 cfg_mgr = NULL;
+        }
+        if (gio_mgr) {
+                destroy_gio_mgr(&gio_mgr);
+                gio_mgr = NULL;
         }
         if (mgr_bus) {
                 mgr_bus_destroy(&mgr_bus);

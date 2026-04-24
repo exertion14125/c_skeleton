@@ -7,9 +7,33 @@
 #include "mgr/red/red_mgr_priv.h"
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
+#include "resource/red/red_state_dto.h"
 
 #define RED_DISPATCH_QCAP    64U
 #define RED_OBS_RING_CAP     128U
+
+static uint64_t red_now_ms(void *user);
+
+static int red_mgr_publish_state(red_mgr_t *m,
+                                 const red_eng_output_t *out,
+                                 uint32_t role_hint)
+{
+        red_state_dto_t dto;
+
+        if (!m || !m->shm_ra || !out) {
+                return -EINVAL;
+        }
+
+        memset(&dto, 0, sizeof(dto));
+        dto.role = role_hint;
+        dto.peer_state = out->reason_code;
+        dto.health = (out->action == RED_ENG_ACT_PROPOSE_FAILOVER) ? 0U : 1U;
+        dto.heartbeat_seq = ++m->heartbeat_seq;
+        dto.ts_ms = red_now_ms(NULL);
+        dto.flags = out->risk_flags;
+
+        return red_shm_ra_write_state(m->shm_ra, &dto);
+}
 
 static uint64_t red_now_ms(void *user)
 {
@@ -93,6 +117,8 @@ static int red_mgr_handle_engine_output(red_mgr_t *m, const red_eng_output_t *ou
         if (!m || !out) {
                 return -EINVAL;
         }
+
+        (void)red_mgr_publish_state(m, out, (uint32_t)out->value);
 
         switch (out->action) {
         case RED_ENG_ACT_PROPOSE_FAILOVER:
@@ -224,6 +250,8 @@ void destroy_red_mgr(red_mgr_t **pm)
 
 int init_red_mgr(red_mgr_t *m, const red_mgr_cfg_t *cfg, const red_mgr_cb_t *cb)
 {
+        red_shm_ra_cfg_t shm_cfg;
+
         if (!m) {
                 return -EINVAL;
         }
@@ -262,6 +290,24 @@ int init_red_mgr(red_mgr_t *m, const red_mgr_cfg_t *cfg, const red_mgr_cb_t *cb)
                 return -1;
         }
 
+        m->shm_ra = alloc_red_shm_ra();
+        if (!m->shm_ra) {
+                destroy_red_engine(&m->engine);
+                return -1;
+        }
+
+        memset(&shm_cfg, 0, sizeof(shm_cfg));
+        shm_cfg.shm_name = "/skeleton_gio_shm";
+
+        if (init_red_shm_ra(m->shm_ra, &shm_cfg) != 0 ||
+            red_shm_ra_connect(m->shm_ra) != 0) {
+                destroy_red_shm_ra(&m->shm_ra);
+                destroy_red_engine(&m->engine);
+                return -1;
+        }
+
+        m->heartbeat_seq = 0U;
+
         m->state = RED_ST_IDLE;
         return 0;
 }
@@ -269,6 +315,7 @@ int init_red_mgr(red_mgr_t *m, const red_mgr_cfg_t *cfg, const red_mgr_cb_t *cb)
 int start_red_mgr(red_mgr_t *m)
 {
         int rc = 0;
+        red_eng_output_t init_out;
 
         if (!m) {
                 return -EINVAL;
@@ -288,6 +335,11 @@ int start_red_mgr(red_mgr_t *m)
                 (void)dispatch_push(m->dispatch, &evt);
                 (void)red_mgr_process_dispatch(m, 1U, 4U);
         }
+
+        memset(&init_out, 0, sizeof(init_out));
+        init_out.action = RED_ENG_ACT_KEEP;
+        init_out.value = 0;
+        (void)red_mgr_publish_state(m, &init_out, 0U);
 
         return 0;
 }
@@ -328,6 +380,9 @@ void deinit_red_mgr(red_mgr_t *m)
         }
         if (m->engine) {
                 destroy_red_engine(&m->engine);
+        }
+        if (m->shm_ra) {
+                destroy_red_shm_ra(&m->shm_ra);
         }
 
         free(m->dispatch_qmem);

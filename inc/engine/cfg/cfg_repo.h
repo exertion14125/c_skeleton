@@ -1,5 +1,5 @@
-#ifndef __MGR_CFG_CFG_REPO_H__
-#define __MGR_CFG_CFG_REPO_H__
+#ifndef __ENGINE_CFG_CFG_REPO_H__
+#define __ENGINE_CFG_CFG_REPO_H__
 
 #include <stdint.h>
 
@@ -26,4 +26,4 @@ extern int cfg_repo_reopen(cfg_repo_t *r);
 extern int cfg_repo_modify(cfg_repo_t *r, const cfg_modify_req_t *req);
 extern int cfg_repo_close(cfg_repo_t *r);
 
-#endif /* __MGR_CFG_CFG_REPO_H__ */
+#endif /* __ENGINE_CFG_CFG_REPO_H__ */

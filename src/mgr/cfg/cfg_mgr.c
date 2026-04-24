@@ -8,9 +8,9 @@
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
 
-#include "ra/cfg/cfg_result_ra.h"
-#include "resource/cfg/cfg_result_dto.h"
-#include "resource/cfg/cfg_request_dto.h"
+#include "ra/cfg/cfg_shm_ra.h"
+#include "resource/cfg/dto/cfg_export_dto.h"
+#include "resource/cfg/dto/cfg_request_dto.h"
 #include "resource/gio/gio_snapshot_dto.h"
 
 #define CFG_DISPATCH_QCAP    64U
@@ -99,30 +99,26 @@ static int cfg_mgr_store_result(cfg_mgr_t *m,
                                 uint32_t version,
                                 const cfg_eng_output_t *out)
 {
-        cfg_result_dto_t dto;
+        cfg_export_dto_t export_dto;
 
-        if (!m || !m->result_ra || !out) {
+        if (!m || !m->shm_ra || !out) {
                 return -EINVAL;
         }
 
-        memset(&dto, 0, sizeof(dto));
-        dto.version = version;
-        dto.valid = 1U;
-        dto.ts_ms = cfg_now_ms(NULL);
+        memset(&export_dto, 0, sizeof(export_dto));
+        m->cfg_generation++;
+        export_dto.cfg_generation = m->cfg_generation;
+        export_dto.scan_period_ms = (uint32_t)((m->cfg.poll_timeout_ms > 0) ? m->cfg.poll_timeout_ms : 100);
+        export_dto.card_count = out->logic_map_valid ? 1U : 0U;
+        export_dto.total_channel_count = out->logic_map_valid ? 2U : 0U;
+        export_dto.flags = out->logic_map_valid ? 1U : 0U;
 
-        if (out->logic_map_valid) {
-                dto.logic_map.out_card_no = out->logic_out_card_no;
-                dto.logic_map.out_card_type = out->logic_out_card_type;
-                dto.logic_map.out_ch0 = out->logic_out_ch0;
-                dto.logic_map.out_ch1 = out->logic_out_ch1;
-        } else {
-                dto.logic_map.out_card_no = 0U;
-                dto.logic_map.out_card_type = GIO_CARD_TYPE_DO;
-                dto.logic_map.out_ch0 = 0U;
-                dto.logic_map.out_ch1 = 1U;
+        if (cfg_shm_ra_write_effective_cfg(m->shm_ra, &export_dto) != 0) {
+                return -1;
         }
 
-        return cfg_result_ra_write(m->result_ra, &dto);
+        (void)version;
+        return 0;
 }
 
 static int cfg_mgr_apply_engine_request_dto(cfg_mgr_t *m,
@@ -220,6 +216,8 @@ void destroy_cfg_mgr(cfg_mgr_t **pm)
 /// @return 0 on success, or a negative error code on failure
 int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
 {
+        cfg_shm_ra_cfg_t shm_cfg;
+
         if (!m) {
                 return -EINVAL;
         }
@@ -270,15 +268,19 @@ int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
                 return -1;
         }
 
-        m->result_ra = alloc_cfg_result_ra();
-        if (!m->result_ra) {
+        m->shm_ra = alloc_cfg_shm_ra();
+        if (!m->shm_ra) {
                 destroy_cfg_request_ra(&m->request_ra);
                 destroy_cfg_engine(&m->engine);
                 return -1;
         }
 
-        if (init_cfg_result_ra(m->result_ra) != 0) {
-                destroy_cfg_result_ra(&m->result_ra);
+        memset(&shm_cfg, 0, sizeof(shm_cfg));
+        shm_cfg.shm_name = "/skeleton_gio_shm";
+
+        if (init_cfg_shm_ra(m->shm_ra, &shm_cfg) != 0 ||
+            cfg_shm_ra_connect(m->shm_ra) != 0) {
+                destroy_cfg_shm_ra(&m->shm_ra);
                 destroy_cfg_request_ra(&m->request_ra);
                 destroy_cfg_engine(&m->engine);
                 return -1;
@@ -291,6 +293,7 @@ int init_cfg_mgr(cfg_mgr_t *m, const cfg_mgr_cfg_t *cfg, const cfg_mgr_cb_t *cb)
         m->logic_map_cache.out_card_type = GIO_CARD_TYPE_DO;
         m->logic_map_cache.out_ch0 = 0U;
         m->logic_map_cache.out_ch1 = 1U;
+        m->cfg_generation = 0U;
 
         m->state = CFG_ST_IDLE;
         return 0;
@@ -370,8 +373,8 @@ void deinit_cfg_mgr(cfg_mgr_t *m)
         if (m->engine) {
                 destroy_cfg_engine(&m->engine);
         }
-        if (m->result_ra) {
-                destroy_cfg_result_ra(&m->result_ra);
+        if (m->shm_ra) {
+                destroy_cfg_shm_ra(&m->shm_ra);
         }
         if (m->request_ra) {
                 destroy_cfg_request_ra(&m->request_ra);

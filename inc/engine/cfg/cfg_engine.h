@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "resource/cfg/cfg_request_dto.h"
+#include "resource/cfg/dto/cfg_request_dto.h"
 
 typedef enum cfg_eng_input_kind_e {
         CFG_ENG_IN_NONE = 0,

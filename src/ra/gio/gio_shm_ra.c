@@ -1,7 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ra/gio/gio_shm_owner_ra.h"
 #include "ra/gio/gio_shm_ra_priv.h"
+#include "util/ipc/shm_dbuf.h"
+#include "util/ipc/shm_layout.h"
 
 static void *gio_shm_ra_get_base_ptr(gio_shm_ra_t *ra)
 {
@@ -9,12 +12,7 @@ static void *gio_shm_ra_get_base_ptr(gio_shm_ra_t *ra)
                 return NULL;
         }
 
-        /*
-         * TODO:
-         *   실제 gio_ipc_shm 구현의 mapped pointer 필드명으로 교체 필요.
-         *   현재는 임시로 mem 필드를 사용.
-         */
-        return (void *)ra->shm.mem;
+        return ra->base_ptr;
 }
 
 gio_shm_ra_t *alloc_gio_shm_ra(void)
@@ -69,6 +67,17 @@ int init_gio_shm_ra(gio_shm_ra_t *ra, const gio_shm_ra_cfg_t *cfg)
         return 0;
 }
 
+int gio_shm_ra_set_base(gio_shm_ra_t *ra, void *base_ptr, size_t size)
+{
+        if (!ra || base_ptr == NULL || size == 0U) {
+                return -1;
+        }
+
+        ra->base_ptr = base_ptr;
+        ra->size = size;
+        return 0;
+}
+
 void deinit_gio_shm_ra(gio_shm_ra_t *ra)
 {
         if (!ra) {
@@ -81,6 +90,7 @@ void deinit_gio_shm_ra(gio_shm_ra_t *ra)
 int gio_shm_ra_connect(gio_shm_ra_t *ra)
 {
         gio_sem_cfg_t scfg;
+        system_shm_t *shm;
 
         if (!ra) {
                 return -1;
@@ -95,15 +105,36 @@ int gio_shm_ra_connect(gio_shm_ra_t *ra)
         scfg.req_init = ra->cfg.req_sem_init;
         scfg.rsp_init = ra->cfg.rsp_sem_init;
 
-        if (gio_shm_open(&ra->shm, ra->cfg.shm_name, 0U) != 0) {
+        if (ra->base_ptr == NULL) {
+                if (gio_shm_owner_ra_get_shared_base(ra->cfg.shm_name, &ra->base_ptr, &ra->size) != 0) {
+                        return -1;
+                }
+        }
+        if (ra->size < sizeof(system_shm_t)) {
                 return -1;
         }
-        if (gio_shm_map(&ra->shm) != 0) {
-                (void)gio_shm_close(&ra->shm);
+
+        shm = (system_shm_t *)ra->base_ptr;
+        if (shm_dbuf_view_bind(&ra->input_view,
+                               &shm->gio_in.ctrl,
+                               &shm->gio_in.slots[0].hdr,
+                               shm->gio_in.slots[0].payload,
+                               &shm->gio_in.slots[1].hdr,
+                               shm->gio_in.slots[1].payload,
+                               SHM_GIO_IN_PAYLOAD_MAX) != SHM_OK) {
                 return -1;
         }
+        if (shm_dbuf_view_bind(&ra->output_view,
+                               &shm->gio_out.ctrl,
+                               &shm->gio_out.slots[0].hdr,
+                               shm->gio_out.slots[0].payload,
+                               &shm->gio_out.slots[1].hdr,
+                               shm->gio_out.slots[1].payload,
+                               SHM_GIO_OUT_PAYLOAD_MAX) != SHM_OK) {
+                return -1;
+        }
+
         if (gio_sem_open(&ra->sem, &scfg) != 0) {
-                (void)gio_shm_close(&ra->shm);
                 return -1;
         }
 
@@ -118,7 +149,6 @@ void gio_shm_ra_disconnect(gio_shm_ra_t *ra)
         }
 
         (void)gio_sem_close(&ra->sem);
-        (void)gio_shm_close(&ra->shm);
         ra->connected = 0U;
 }
 
@@ -128,14 +158,19 @@ int gio_shm_ra_exec(gio_shm_ra_t *ra,
 {
         uint32_t n;
         int rc = -1;
+        gio_shm_t shm_view;
         gio_ipc_req_t raw_req;
         gio_ipc_rsp_t raw_rsp;
+        uint8_t *ipc_base;
 
         if (!ra || !req || !rsp) {
                 return -1;
         }
         if (!ra->connected) {
                 return -1;
+        }
+        if (!ra->base_ptr || ra->size == 0U) {
+            return -1;
         }
 
         memset(&raw_req, 0, sizeof(raw_req));
@@ -144,8 +179,13 @@ int gio_shm_ra_exec(gio_shm_ra_t *ra,
 
         memset(rsp, 0, sizeof(*rsp));
 
+        memset(&shm_view, 0, sizeof(shm_view));
+        ipc_base = (uint8_t *)ra->base_ptr + sizeof(system_shm_t);
+        shm_view.mem = ipc_base;
+        shm_view.size = ra->size;
+
         for (n = 0; n <= ra->cfg.max_retry; ++n) {
-                if (gio_shm_write_req(&ra->shm, &raw_req) != 0) {
+                if (gio_shm_write_req(&shm_view, &raw_req) != 0) {
                         rc = -1;
                         continue;
                 }
@@ -155,7 +195,7 @@ int gio_shm_ra_exec(gio_shm_ra_t *ra,
                 }
                 rc = gio_sem_wait_rsp(&ra->sem, ra->cfg.timeout_ms);
                 if (rc == 0) {
-                        if (gio_shm_read_rsp(&ra->shm, &raw_rsp) == 0) {
+                        if (gio_shm_read_rsp(&shm_view, &raw_rsp) == 0) {
                                 rsp->rc = raw_rsp.rc;
                                 return 0;
                         }
@@ -169,35 +209,51 @@ int gio_shm_ra_exec(gio_shm_ra_t *ra,
 
 int gio_shm_ra_read_all(gio_shm_ra_t *ra, gio_shared_memory_t *out)
 {
-        void *base;
+        uint32_t sz = 0U;
 
         if (!ra || !out || !ra->connected) {
                 return -1;
         }
 
-        base = gio_shm_ra_get_base_ptr(ra);
-        if (!base) {
+        memset(out, 0, sizeof(*out));
+        out->ctrl = ra->ctrl_cache;
+
+        if (shm_dbuf_read_snapshot(&ra->input_view,
+                                   &out->input,
+                                   (uint32_t)sizeof(out->input),
+                                   &sz,
+                                   NULL) != SHM_OK) {
+                return -1;
+        }
+        if (sz != sizeof(out->input)) {
                 return -1;
         }
 
-        memcpy(out, base, sizeof(*out));
+        if (shm_dbuf_read_snapshot(&ra->output_view,
+                                   &out->output,
+                                   (uint32_t)sizeof(out->output),
+                                   &sz,
+                                   NULL) != SHM_OK) {
+                return -1;
+        }
+        if (sz != sizeof(out->output)) {
+                return -1;
+        }
+
         return 0;
 }
 
 int gio_shm_ra_write_all(gio_shm_ra_t *ra, const gio_shared_memory_t *in)
 {
-        void *base;
-
         if (!ra || !in || !ra->connected) {
                 return -1;
         }
 
-        base = gio_shm_ra_get_base_ptr(ra);
-        if (!base) {
+        ra->ctrl_cache = in->ctrl;
+        if (gio_shm_ra_write_output_snapshot(ra, &in->output) != 0) {
                 return -1;
         }
 
-        memcpy(base, in, sizeof(*in));
         return 0;
 }
 
@@ -218,45 +274,58 @@ int gio_shm_ra_read_ctrl(gio_shm_ra_t *ra, gio_shm_ctrl_t *out)
 
 int gio_shm_ra_write_ctrl(gio_shm_ra_t *ra, const gio_shm_ctrl_t *in)
 {
-        gio_shared_memory_t shm_data;
-
         if (!in) {
                 return -1;
         }
-        if (gio_shm_ra_read_all(ra, &shm_data) != 0) {
-                return -1;
-        }
 
-        shm_data.ctrl = *in;
-        return gio_shm_ra_write_all(ra, &shm_data);
+        ra->ctrl_cache = *in;
+        return 0;
 }
 
 int gio_shm_ra_read_input(gio_shm_ra_t *ra, gio_input_snapshot_t *out)
 {
-        gio_shared_memory_t shm_data;
-
-        if (!out) {
-                return -1;
-        }
-        if (gio_shm_ra_read_all(ra, &shm_data) != 0) {
-                return -1;
-        }
-
-        *out = shm_data.input;
-        return 0;
+        return gio_shm_ra_read_input_snapshot(ra, out, NULL);
 }
 
 int gio_shm_ra_write_output(gio_shm_ra_t *ra, const gio_output_snapshot_t *in)
 {
-        gio_shared_memory_t shm_data;
+        return gio_shm_ra_write_output_snapshot(ra, in);
+}
 
-        if (!in) {
+int gio_shm_ra_read_input_snapshot(gio_shm_ra_t *ra, gio_input_snapshot_t *out, uint32_t *out_seq)
+{
+        uint32_t sz = 0U;
+        uint32_t seq = 0U;
+
+        if (!ra || !out || !ra->connected) {
                 return -1;
         }
-        if (gio_shm_ra_read_all(ra, &shm_data) != 0) {
+
+        if (shm_dbuf_read_snapshot(&ra->input_view,
+                                   out,
+                                   (uint32_t)sizeof(*out),
+                                   &sz,
+                                   &seq) != SHM_OK) {
+                return -1;
+        }
+        if (sz != sizeof(*out)) {
+                return -1;
+        }
+        if (out_seq) {
+                *out_seq = seq;
+        }
+        return 0;
+}
+
+int gio_shm_ra_write_output_snapshot(gio_shm_ra_t *ra, const gio_output_snapshot_t *in)
+{
+        if (!ra || !in || !ra->connected) {
                 return -1;
         }
 
-        shm_data.output = *in;
-        return gio_shm_ra_write_all(ra, &shm_data);
+        return (shm_dbuf_publish(&ra->output_view,
+                                 in,
+                                 (uint32_t)sizeof(*in),
+                                 0U,
+                                 0U) == SHM_OK) ? 0 : -1;
 }

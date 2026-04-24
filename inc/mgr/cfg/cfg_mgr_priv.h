@@ -7,7 +7,7 @@
 #include "mgr/cfg/cfg_mgr.h"
 #include "engine/cfg/cfg_engine.h"
 #include "ra/cfg/cfg_request_ra.h"
-#include "ra/cfg/cfg_result_ra.h"
+#include "ra/cfg/cfg_shm_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
 #include "util/dispatch/dispatch.h"
@@ -59,7 +59,8 @@ struct cfg_mgr_s {
         cfg_engine_t *engine;
 
         cfg_request_ra_t *request_ra;
-        cfg_result_ra_t *result_ra;
+        cfg_shm_ra_t *shm_ra;
+        uint32_t cfg_generation;
 
         cfg_logic_map_cache_t logic_map_cache;
 };

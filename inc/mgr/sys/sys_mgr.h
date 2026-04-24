@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "util/mgr_bus/mgr_bus.h"
-#include "resource/cfg/cfg_request_dto.h"
+#include "resource/cfg/dto/cfg_request_dto.h"
 #include "resource/logic/logic_cfg_dto.h"
 
 typedef struct sys_mgr_s sys_mgr_t;

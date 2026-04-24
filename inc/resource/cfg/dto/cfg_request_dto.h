@@ -1,5 +1,5 @@
-#ifndef __RESOURCE_CFG_CFG_REQUEST_DTO_H__
-#define __RESOURCE_CFG_CFG_REQUEST_DTO_H__
+#ifndef __RESOURCE_CFG_DTO_CFG_REQUEST_DTO_H__
+#define __RESOURCE_CFG_DTO_CFG_REQUEST_DTO_H__
 
 #include <stdint.h>
 
@@ -30,4 +30,4 @@ typedef struct cfg_request_dto_s {
         cfg_modify_request_t modify;
 } cfg_request_dto_t;
 
-#endif /* __RESOURCE_CFG_CFG_REQUEST_DTO_H__ */
+#endif /* __RESOURCE_CFG_DTO_CFG_REQUEST_DTO_H__ */

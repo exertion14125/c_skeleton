@@ -2,7 +2,7 @@
 #define __ENGINE_CFG_CFG_ENGINE_PRIV_H__
 
 #include "engine/cfg/cfg_engine.h"
-#include "mgr/cfg/cfg_repo.h"
+#include "engine/cfg/cfg_repo.h"
 
 struct cfg_engine_s {
         cfg_repo_t repo;

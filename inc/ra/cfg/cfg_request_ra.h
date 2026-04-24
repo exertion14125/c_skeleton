@@ -1,7 +1,7 @@
 #ifndef __RA_CFG_CFG_REQUEST_RA_H__
 #define __RA_CFG_CFG_REQUEST_RA_H__
 
-#include "resource/cfg/cfg_request_dto.h"
+#include "resource/cfg/dto/cfg_request_dto.h"
 
 typedef struct cfg_request_ra_s cfg_request_ra_t;
 

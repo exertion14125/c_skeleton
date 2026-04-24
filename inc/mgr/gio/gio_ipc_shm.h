@@ -15,6 +15,8 @@ typedef struct gio_ipc_rsp_s {
         int32_t data;
 } gio_ipc_rsp_t;
 
+#define GIO_IPC_BLOCK_BYTES ((size_t)(sizeof(gio_ipc_req_t) + sizeof(gio_ipc_rsp_t)))
+
 typedef struct gio_shm_s {
         int fd;
         size_t size;

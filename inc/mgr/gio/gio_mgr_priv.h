@@ -6,6 +6,7 @@
 
 #include "mgr/gio/gio_mgr.h"
 #include "engine/gio/gio_engine.h"
+#include "ra/gio/gio_shm_owner_ra.h"
 #include "ra/gio/gio_shm_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
@@ -51,6 +52,7 @@ struct gio_mgr_s {
         uint32_t obs_ring_cap;
 
         gio_engine_t *engine;
+        gio_shm_owner_ra_t *owner_ra;
         gio_shm_ra_t *ra;
 };
 

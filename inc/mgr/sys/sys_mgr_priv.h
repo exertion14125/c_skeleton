@@ -7,7 +7,7 @@
 #include "mgr/sys/sys_mgr.h"
 #include "engine/sys/sys_engine.h"
 #include "ra/cfg/cfg_request_ra.h"
-#include "ra/cfg/cfg_result_ra.h"
+#include "ra/cfg/cfg_shm_ra.h"
 #include "ra/logic/logic_cfg_ra.h"
 #include "util/mgr_bus/mgr_bus.h"
 #include "util/fsm/fsm.h"
@@ -52,7 +52,7 @@ struct sys_mgr_s {
         sys_engine_t *engine;
 
         cfg_request_ra_t *cfg_request_ra;
-        cfg_result_ra_t *cfg_result_ra;
+        cfg_shm_ra_t *cfg_shm_ra;
         logic_cfg_ra_t *logic_cfg_ra;
 };
 

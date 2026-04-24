@@ -9,10 +9,10 @@
 #include "mgr/contract/mgr_msg_codes.h"
 
 #include "ra/cfg/cfg_request_ra.h"
-#include "ra/cfg/cfg_result_ra.h"
+#include "ra/cfg/cfg_shm_ra.h"
 #include "ra/logic/logic_cfg_ra.h"
-#include "resource/cfg/cfg_request_dto.h"
-#include "resource/cfg/cfg_result_dto.h"
+#include "resource/cfg/dto/cfg_request_dto.h"
+#include "resource/cfg/dto/cfg_export_dto.h"
 #include "resource/logic/logic_cfg_dto.h"
 #include "resource/gio/gio_snapshot_dto.h"
 
@@ -119,38 +119,44 @@ static int sys_mgr_send_cfg_request(sys_mgr_t *m,
                             sys_now_ms(NULL));
 }
 
-static int sys_mgr_apply_logic_cfg_from_cfg_result(sys_mgr_t *m)
+static int sys_mgr_apply_logic_cfg_from_cfg_export(sys_mgr_t *m)
 {
-        cfg_result_dto_t cfgres;
+        cfg_export_dto_t cfgexp;
         logic_cfg_dto_t logiccfg;
+        uint32_t route_count;
 
-        if (!m || !m->cfg_result_ra) {
+        if (!m || !m->cfg_shm_ra) {
                 return -EINVAL;
         }
 
-        memset(&cfgres, 0, sizeof(cfgres));
-        if (cfg_result_ra_read(m->cfg_result_ra, &cfgres) != 0 || !cfgres.valid) {
+        memset(&cfgexp, 0, sizeof(cfgexp));
+        if (cfg_shm_ra_read_effective_cfg(m->cfg_shm_ra, &cfgexp) != 0) {
                 return -1;
         }
 
         memset(&logiccfg, 0, sizeof(logiccfg));
-        logiccfg.version = cfgres.version;
+        logiccfg.version = cfgexp.cfg_generation;
         logiccfg.valid = 1U;
         logiccfg.ts_ms = sys_now_ms(NULL);
 
-        logiccfg.out_map_cfg.route_count = 2U;
+        route_count = (cfgexp.total_channel_count >= 2U) ? 2U : cfgexp.total_channel_count;
+        logiccfg.out_map_cfg.route_count = route_count;
 
-        logiccfg.out_map_cfg.routes[0].valid = 1U;
-        logiccfg.out_map_cfg.routes[0].out_card_no = cfgres.logic_map.out_card_no;
-        logiccfg.out_map_cfg.routes[0].out_card_type = cfgres.logic_map.out_card_type;
-        logiccfg.out_map_cfg.routes[0].out_value_index = 0U;
-        logiccfg.out_map_cfg.routes[0].out_ch = cfgres.logic_map.out_ch0;
+        if (route_count > 0U) {
+                logiccfg.out_map_cfg.routes[0].valid = 1U;
+                logiccfg.out_map_cfg.routes[0].out_card_no = 0U;
+                logiccfg.out_map_cfg.routes[0].out_card_type = GIO_CARD_TYPE_DO;
+                logiccfg.out_map_cfg.routes[0].out_value_index = 0U;
+                logiccfg.out_map_cfg.routes[0].out_ch = 0U;
+        }
 
-        logiccfg.out_map_cfg.routes[1].valid = 1U;
-        logiccfg.out_map_cfg.routes[1].out_card_no = cfgres.logic_map.out_card_no;
-        logiccfg.out_map_cfg.routes[1].out_card_type = cfgres.logic_map.out_card_type;
-        logiccfg.out_map_cfg.routes[1].out_value_index = 1U;
-        logiccfg.out_map_cfg.routes[1].out_ch = cfgres.logic_map.out_ch1;
+        if (route_count > 1U) {
+                logiccfg.out_map_cfg.routes[1].valid = 1U;
+                logiccfg.out_map_cfg.routes[1].out_card_no = 0U;
+                logiccfg.out_map_cfg.routes[1].out_card_type = GIO_CARD_TYPE_DO;
+                logiccfg.out_map_cfg.routes[1].out_value_index = 1U;
+                logiccfg.out_map_cfg.routes[1].out_ch = 1U;
+        }
 
         return sys_mgr_send_logic_cfg(m, &logiccfg);
 }
@@ -395,7 +401,7 @@ static int sys_mgr_on_cfg_rsp(sys_mgr_t *m, const mgr_bus_msg_t *msg)
         rc = sys_mgr_apply_engine(m, SYS_ENG_IN_CFG_RSP, msg);
 
         if (msg->b == 0) {
-                (void)sys_mgr_apply_logic_cfg_from_cfg_result(m);
+                (void)sys_mgr_apply_logic_cfg_from_cfg_export(m);
         }
 
         return rc;
@@ -614,6 +620,8 @@ void destroy_sys_mgr(sys_mgr_t **pm)
 
 int init_sys_mgr(sys_mgr_t *m, const sys_mgr_cfg_t *cfg, const sys_mgr_cb_t *cb)
 {
+        cfg_shm_ra_cfg_t cfg_shm_cfg;
+
         if (!m) {
                 return -EINVAL;
         }
@@ -674,15 +682,19 @@ int init_sys_mgr(sys_mgr_t *m, const sys_mgr_cfg_t *cfg, const sys_mgr_cb_t *cb)
                 return -1;
         }
 
-        m->cfg_result_ra = alloc_cfg_result_ra();
-        if (!m->cfg_result_ra) {
+        m->cfg_shm_ra = alloc_cfg_shm_ra();
+        if (!m->cfg_shm_ra) {
                 destroy_cfg_request_ra(&m->cfg_request_ra);
                 destroy_sys_engine(&m->engine);
                 return -1;
         }
 
-        if (init_cfg_result_ra(m->cfg_result_ra) != 0) {
-                destroy_cfg_result_ra(&m->cfg_result_ra);
+        memset(&cfg_shm_cfg, 0, sizeof(cfg_shm_cfg));
+        cfg_shm_cfg.shm_name = "/skeleton_gio_shm";
+
+        if (init_cfg_shm_ra(m->cfg_shm_ra, &cfg_shm_cfg) != 0 ||
+            cfg_shm_ra_connect(m->cfg_shm_ra) != 0) {
+                destroy_cfg_shm_ra(&m->cfg_shm_ra);
                 destroy_cfg_request_ra(&m->cfg_request_ra);
                 destroy_sys_engine(&m->engine);
                 return -1;
@@ -690,7 +702,7 @@ int init_sys_mgr(sys_mgr_t *m, const sys_mgr_cfg_t *cfg, const sys_mgr_cb_t *cb)
 
         m->logic_cfg_ra = alloc_logic_cfg_ra();
         if (!m->logic_cfg_ra) {
-                destroy_cfg_result_ra(&m->cfg_result_ra);
+                destroy_cfg_shm_ra(&m->cfg_shm_ra);
                 destroy_cfg_request_ra(&m->cfg_request_ra);
                 destroy_sys_engine(&m->engine);
                 return -1;
@@ -698,7 +710,7 @@ int init_sys_mgr(sys_mgr_t *m, const sys_mgr_cfg_t *cfg, const sys_mgr_cb_t *cb)
 
         if (init_logic_cfg_ra(m->logic_cfg_ra) != 0) {
                 destroy_logic_cfg_ra(&m->logic_cfg_ra);
-                destroy_cfg_result_ra(&m->cfg_result_ra);
+                destroy_cfg_shm_ra(&m->cfg_shm_ra);
                 destroy_cfg_request_ra(&m->cfg_request_ra);
                 destroy_sys_engine(&m->engine);
                 return -1;
@@ -776,8 +788,8 @@ void deinit_sys_mgr(sys_mgr_t *m)
         if (m->logic_cfg_ra) {
                 destroy_logic_cfg_ra(&m->logic_cfg_ra);
         }
-        if (m->cfg_result_ra) {
-                destroy_cfg_result_ra(&m->cfg_result_ra);
+        if (m->cfg_shm_ra) {
+                destroy_cfg_shm_ra(&m->cfg_shm_ra);
         }
         if (m->cfg_request_ra) {
                 destroy_cfg_request_ra(&m->cfg_request_ra);
