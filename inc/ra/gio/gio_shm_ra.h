@@ -4,27 +4,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mgr/gio/gio_ipc_shm.h"
-#include "mgr/gio/gio_ipc_sem.h"
+#include "ra/gio/gio_ipc_shm.h"
+#include "ra/gio/gio_ipc_sem.h"
 #include "resource/gio/gio_snapshot_dto.h"
 
+/// @brief Configuration structure for the GIO shared memory RA, containing parameters for shared memory 
+/// and semaphore names, as well as retry and timeout settings.
 typedef struct gio_shm_ra_cfg_s {
-        const char *shm_name;
-        const char *req_sem_name;
-        const char *rsp_sem_name;
-        uint32_t req_sem_init;
-        uint32_t rsp_sem_init;
-        uint32_t max_retry;
-        uint32_t timeout_ms;
+        const char *shm_name;           ///< Name of the shared memory segment used for communication between GIO and IO processes.
+        const char *req_sem_name;       ///< Name of the semaphore used for request synchronization between GIO and IO processes.
+        const char *rsp_sem_name;       ///< Name of the semaphore used for response synchronization between GIO and IO processes.
+        uint32_t req_sem_init;          ///< Initial value for the request semaphore, indicating the number of available request slots.
+        uint32_t rsp_sem_init;          ///< Initial value for the response semaphore, indicating the number of available response slots.
+        uint32_t max_retry;             ///< Maximum number of retry attempts for IPC operations in case of transient failures or timeouts.
+        uint32_t timeout_ms;            ///< Timeout duration in milliseconds for IPC operations, after which a retry will be attempted if max_retry is not exceeded.
 } gio_shm_ra_cfg_t;
 
+/// @brief Structure representing a request for the GIO shared memory RA.
 typedef struct gio_shm_ra_exec_req_s {
-        uint32_t req_id;
-        int32_t arg;
+        uint32_t req_id;               ///< Identifier for the request.
+        int32_t arg;                   ///< Argument for the request.
 } gio_shm_ra_exec_req_t;
 
+/// @brief Structure representing a response for the GIO shared memory RA.
 typedef struct gio_shm_ra_exec_rsp_s {
-        int32_t rc;
+        int32_t rc;                    ///< Return code for the request.
 } gio_shm_ra_exec_rsp_t;
 
 typedef struct gio_shm_ra_s gio_shm_ra_t;

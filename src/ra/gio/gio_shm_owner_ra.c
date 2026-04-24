@@ -1,9 +1,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mgr/gio/gio_ipc_shm.h"
+#include "ra/gio/gio_ipc_shm.h"
 #include "ra/gio/gio_shm_owner_ra.h"
-#include "util/ipc/shm_layout.h"
+#include "util/ipc/system_shm_layout.h"
 
 /// @brief Shared memory owner resource accessor for GIO manager. 
 /// This module manages the shared memory segment used for GIO IPC, 

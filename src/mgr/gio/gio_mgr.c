@@ -7,7 +7,7 @@
 #include "mgr/gio/gio_mgr_priv.h"
 #include "mgr/contract/mgr_addrs.h"
 #include "mgr/contract/mgr_msg_codes.h"
-#include "util/ipc/shm_layout.h"
+#include "util/ipc/system_shm_layout.h"
 
 #define GIO_DISPATCH_QCAP    64U
 #define GIO_OBS_RING_CAP     128U

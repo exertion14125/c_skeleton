@@ -4,7 +4,7 @@
 #include "ra/cfg/cfg_shm_ra.h"
 #include "ra/gio/gio_shm_owner_ra.h"
 #include "util/ipc/shm_dbuf.h"
-#include "util/ipc/shm_layout.h"
+#include "util/ipc/system_shm_layout.h"
 
 struct cfg_shm_ra_s {
         cfg_shm_ra_cfg_t cfg;

@@ -202,21 +202,16 @@ int main(int argc, char *argv[])
         }
 
         //===== Bootstrap domain managers.
-        
         gio_mgr = bootstrap_gio_mgr();
         if (!gio_mgr) {
                 LOGE_T("MAIN", "Failed to bootstrap GIO manager.\n");
                 goto skeleton_exit;
         }
-
         cfg_mgr = bootstrap_cfg_mgr();
         if (!cfg_mgr) {
                 LOGE_T("MAIN", "Failed to bootstrap CFG manager.\n");
                 goto skeleton_exit;
         }
-
-        
-
         red_mgr = bootstrap_red_mgr();
         if (!red_mgr) {
                 LOGE_T("MAIN", "Failed to bootstrap RED manager.\n");

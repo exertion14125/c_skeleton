@@ -4,7 +4,7 @@
 #include "ra/gio/gio_shm_owner_ra.h"
 #include "ra/red/red_shm_ra.h"
 #include "util/ipc/shm_dbuf.h"
-#include "util/ipc/shm_layout.h"
+#include "util/ipc/system_shm_layout.h"
 
 struct red_shm_ra_s {
         red_shm_ra_cfg_t cfg;

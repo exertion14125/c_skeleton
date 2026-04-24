@@ -30,18 +30,18 @@ typedef struct shm_global_hdr_s {
 
 /// @brief SHM double buffer control structure. Manages the state and metadata for a double-buffered data region.
 typedef struct shm_dbuf_ctrl_s {
-    uint32_t active_idx;    //<< Index of the currently active buffer.
-    uint32_t publish_seq;   //<< Sequence number for tracking publications.
-    uint32_t payload_size;  //<< Size of the payload in the buffer.
-    uint32_t flags;         //<< Flags for buffer state or attributes.
+        uint32_t active_idx;    //<< Index of the currently active buffer.
+        uint32_t publish_seq;   //<< Sequence number for tracking publications.
+        uint32_t payload_size;  //<< Size of the payload in the buffer.
+        uint32_t flags;         //<< Flags for buffer state or attributes.
 } shm_dbuf_ctrl_t;
 
 /// @brief SHM slot header structure. Placed at the beginning of each slot in the double buffer for metadata and validation.
 typedef struct shm_slot_hdr_s {
-    uint32_t seq;       //<< Sequence number for the slot.
-    uint32_t size;      //<< Size of the slot's payload.
-    uint32_t flags;     //<< Flags for slot state or attributes.
-    uint32_t reserved;  //<< Reserved for future use, should be set to 0.
+        uint32_t seq;       //<< Sequence number for the slot.
+        uint32_t size;      //<< Size of the slot's payload.
+        uint32_t flags;     //<< Flags for slot state or attributes.
+        uint32_t reserved;  //<< Reserved for future use, should be set to 0.
 } shm_slot_hdr_t;
 
 ///===== Memory barrier helpers for DBUF publish/read ordering. =====//

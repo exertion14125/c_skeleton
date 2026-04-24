@@ -1,3 +1,4 @@
 _arm_linux_build
 .vscode
+.github
 tree.sh
